@@ -4,22 +4,25 @@
 仿真模式 · 单臂视觉抓取
 ========================
 与 run_rs_d435_grasp_lite6_new_best.py 对应，将物理机械臂控制替换为
-HTTP 仿真调用。相机固定于观察位，单阶段检测 + 聚类锁定目标后，
-构建完整 pick-and-place 序列并 POST 到仿真服务器执行。
+HTTP 仿真调用。相机固定于观察位，识别目标后构建完整 pick-and-place
+序列并 POST 到仿真服务器执行。
 
 流程:
-  观察位拍照 → GGCNN 推理 → 候选缓冲+聚类 → LOCKED
+  启动时交互选择识别方式（摄像头 / 手动输入）
+  → 摄像头识别: 观察位拍照 → GGCNN 推理 → 候选缓冲+聚类 → LOCKED
+  → 手动输入: HTTP 接收外部坐标 → 校验 → LOCKED
   → TaskBuilder 构建序列 → SimulationClient POST → 等待冷却 → 循环
 操作：放物块即自动识别并发送仿真任务，按 q / ESC 退出。
+
+识别方式（工序开始时可交互选择）:
+  [1] 摄像头识别: GGCNN 神经网络从深度图推理
+  [2] 手动坐标输入: HTTP 服务器接收外部坐标 (POST /grasp_target)
+  --ext-input: 跳过交互选择，直接进入手动输入模式
 
 摄像头模式:
   默认: BuiltinCamera (本地合成图像，无需任何硬件或服务器)
   --sim-camera: SimCamera (从 HTTP 仿真服务器获取图像)
   --no-camera: 静态虚拟图像 (测试用)
-
-外部输入:
-  --ext-input: 启动 HTTP 服务器接收外部坐标 (POST /grasp_target)
-  外部坐标优先级高于摄像头 → GGCNN 管线。
 """
 
 import os
@@ -33,9 +36,13 @@ import argparse
 import numpy as np
 from queue import Queue
 from collections import Counter
+import enum
 
-# 把上两级目录加入搜索路径，才能 import 到 camera / grasp 模块
-sys.path.append(os.path.join(os.path.dirname(__file__), '../..'))
+# 把上级目录（ggcnn_grasping_demo）加入搜索路径，才能 import 到 camera / grasp / multi_arm 模块
+_sim_dir = os.path.dirname(os.path.abspath(__file__))
+_demo_dir = os.path.join(_sim_dir, '..')
+if _demo_dir not in sys.path:
+    sys.path.insert(0, _demo_dir)
 from camera.utils import get_combined_img
 from grasp.ggcnn_torch import TorchGGCNN
 from grasp.helpers.matrix_funcs import euler2mat, convert_pose
@@ -48,11 +55,14 @@ from builtin_camera import BuiltinCamera
 from external_input import ExternalInputServer
 
 # 引入 dominant_cluster（位于 multi_arm 包内）
-_current_dir = os.path.dirname(os.path.abspath(__file__))
-_parent_dir = os.path.join(_current_dir, '..')
-if _parent_dir not in sys.path:
-    sys.path.insert(0, _parent_dir)
 from multi_arm.dominant_cluster import dominant_cluster
+
+
+class RecognitionMode(enum.Enum):
+    """抓取目标识别模式：工序开始时由操作人员交互选择。"""
+    CAMERA = "camera"   # 摄像头识别 (GGCNN 神经网络推理)
+    MANUAL = "manual"   # 手动坐标输入 (HTTP 服务器接收外部坐标)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 配置区（与 run_rs_d435_grasp_lite6_new_best.py 保持一致）
@@ -160,10 +170,141 @@ def cam_result_to_base(result):
     ]
 
 
+def validate_grasp_target(target, logger=None):
+    """全面校验抓取目标坐标是否合法、可达。
+
+    对传入的基坐标系目标 [X, Y, Z, Roll, Pitch, Yaw] (mm/度) 执行:
+      - XY 工作区范围检查
+      - Z 高度上下限检查
+      - 姿态角度范围检查与归一化
+      - 非数值 / 无穷大检测
+
+    参数:
+        target: [x, y, z, roll, pitch, yaw] 或包含至少 6 个元素的 list
+        logger: 可选的 logging.Logger，用于输出警告信息
+
+    返回:
+        (is_valid, corrected_target, reason)
+        is_valid:        bool — True 表示目标可用
+        corrected_target: list — 校验通过的目标（yaw 可能已被归一化）
+        reason:          str  — 校验失败时的原因描述，成功时为 "OK"
+    """
+    # ── 基本类型检查 ──
+    if target is None or len(target) < 3:
+        return False, target, "目标为空或缺少必要字段 (至少需要 X, Y, Z)"
+
+    try:
+        x, y, z = float(target[0]), float(target[1]), float(target[2])
+        roll = float(target[3]) if len(target) > 3 else 180.0
+        pitch = float(target[4]) if len(target) > 4 else 0.0
+        yaw = float(target[5]) if len(target) > 5 else 0.0
+    except (TypeError, ValueError) as e:
+        return False, target, f"坐标值无法转换为数字: {e}"
+
+    # ── 非数值 / 无穷大检测 ──
+    for name, val in [('X', x), ('Y', y), ('Z', z), ('Roll', roll),
+                       ('Pitch', pitch), ('Yaw', yaw)]:
+        if math.isnan(val):
+            return False, target, f"{name} 为 NaN (非数值)"
+        if math.isinf(val):
+            return False, target, f"{name} 为无穷大"
+
+    # ── XY 工作区范围 ──
+    x_min, x_max = GRASPING_RANGE[0], GRASPING_RANGE[1]
+    y_min, y_max = GRASPING_RANGE[2], GRASPING_RANGE[3]
+    if not (x_min <= x <= x_max):
+        return False, target, f"X={x:.1f} 超出工作区 [{x_min}, {x_max}] mm"
+    if not (y_min <= y <= y_max):
+        return False, target, f"Y={y:.1f} 超出工作区 [{y_min}, {y_max}] mm"
+
+    # ── Z 高度检查 ──
+    z_max = ABOVE_Z + 100  # 安全悬停高度以上 100mm 为上限
+    if z < GRASPING_MIN_Z:
+        return False, target, f"Z={z:.1f} 低于最低限位 {GRASPING_MIN_Z} mm (防撞桌)"
+    if z > z_max:
+        return False, target, f"Z={z:.1f} 高于最大允许高度 {z_max} mm"
+
+    # ── 姿态角度校验与归一化 ──
+    # Roll 应为 ~180° (末端朝下)，允许 ±10° 偏差
+    if not (170.0 <= roll <= 190.0):
+        if logger:
+            logger.warning("Roll=%.1f° 偏离预期 (180° 末端朝下)，已自动修正为 180°", roll)
+        roll = 180.0
+
+    # Pitch 应为 ~0°，允许 ±15° 偏差
+    if not (-15.0 <= pitch <= 15.0):
+        if logger:
+            logger.warning("Pitch=%.1f° 偏离预期 (0°)，已自动修正为 0°", pitch)
+        pitch = 0.0
+
+    # Yaw 归一化到 [-180, 180]
+    yaw = yaw % 360.0
+    if yaw > 180.0:
+        yaw -= 360.0
+    elif yaw < -180.0:
+        yaw += 360.0
+
+    if abs(yaw) > 90.0:
+        if logger:
+            logger.warning("Yaw=%.1f° 超出抓取角范围 [-90°, 90°]，已钳位", yaw)
+        yaw = max(-90.0, min(90.0, yaw))
+
+    corrected = [x, y, z, roll, pitch, yaw]
+    return True, corrected, "OK"
+
+
 def in_range(g):
     """目标 XY 是否在安全抓取范围内。"""
     return (GRASPING_RANGE[0] <= g[0] <= GRASPING_RANGE[1] and
             GRASPING_RANGE[2] <= g[1] <= GRASPING_RANGE[3])
+
+
+def choose_recognition_mode(args, logger):
+    """让操作人员在工序开始时选择物体识别方式。
+
+    交互菜单:
+        [1] 摄像头识别 (GGCNN 神经网络从深度图推理抓取点)
+        [2] 手动坐标输入 (HTTP 服务器接收外部坐标 POST /grasp_target)
+
+    CLI 兼容:
+        --ext-input: 跳过交互提示，直接进入手动坐标输入模式（非交互场景）
+
+    返回:
+        RecognitionMode 枚举值
+    """
+    # ── 非交互覆盖：--ext-input 直接进入手动模式 ──
+    if args.ext_input:
+        logger.info("--ext-input 已指定，跳过交互选择，使用手动坐标输入模式")
+        return RecognitionMode.MANUAL
+
+    print("\n" + "=" * 60)
+    print("  物体识别方式选择 / Recognition Mode Selection")
+    print("=" * 60)
+    print("  [1] 摄像头识别 (Camera recognition)")
+    print("      GGCNN 神经网络从深度图推理抓取点")
+    print()
+    print("  [2] 手动坐标输入 (Manual coordinate input)")
+    print("      HTTP 服务器接收外部坐标 (POST /grasp_target)")
+    print("=" * 60)
+
+    while True:
+        try:
+            choice = input("请选择 (1/2): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("  输入中断，默认使用摄像头识别模式")
+            logger.warning("交互输入中断，默认使用摄像头识别模式")
+            return RecognitionMode.CAMERA
+
+        if choice == '1':
+            logger.info("已选择: 摄像头识别 (GGCNN)")
+            return RecognitionMode.CAMERA
+        elif choice == '2':
+            logger.info("已选择: 手动坐标输入 (HTTP)")
+            return RecognitionMode.MANUAL
+        else:
+            print("  无效输入，请输入 1 或 2")
+
+    return RecognitionMode.CAMERA
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -222,6 +363,14 @@ def main():
     logger.info(f"  观察位:     {DETECT_XYZ}")
     logger.info(f"  释放位:     {RELEASE_XYZ}")
     logger.info("=" * 60)
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # 0. 选择物体识别方式（交互菜单 / --ext-input 覆盖）
+    # ═════════════════════════════════════════════════════════════════════════
+    mode = choose_recognition_mode(args, logger)
+    mode_desc = ("摄像头识别 (GGCNN)" if mode == RecognitionMode.CAMERA
+                 else "手动坐标输入 (HTTP)")
+    logger.info("识别模式: %s", mode_desc)
 
     # ═════════════════════════════════════════════════════════════════════════
     # 1. 初始化仿真客户端
@@ -292,16 +441,20 @@ def main():
         )
 
     # ═════════════════════════════════════════════════════════════════════════
-    # 3. 初始化 GGCNN 模型
+    # 3. 初始化 GGCNN 模型（仅摄像头识别模式需要）
     # ═════════════════════════════════════════════════════════════════════════
-    logger.info(f"加载 GGCNN2 模型: {args.model}")
-    ggcnn = TorchGGCNN({
-        'MODEL_FILE': args.model,
-        'OPEN_LOOP_HEIGHT': 0,       # 始终取全局最大值
-        'GGCNN_IN_THREAD': False,    # 主线程同步推理
-        'DEPTH_CAM_K': K,
-    }, Queue(1), Queue(1))
-    time.sleep(1)
+    ggcnn = None
+    if mode == RecognitionMode.CAMERA:
+        logger.info(f"加载 GGCNN2 模型: {args.model}")
+        ggcnn = TorchGGCNN({
+            'MODEL_FILE': args.model,
+            'OPEN_LOOP_HEIGHT': 0,       # 始终取全局最大值
+            'GGCNN_IN_THREAD': False,    # 主线程同步推理
+            'DEPTH_CAM_K': K,
+        }, Queue(1), Queue(1))
+        time.sleep(1)
+    else:
+        logger.info("手动输入模式：跳过 GGCNN 模型加载")
 
     # ═════════════════════════════════════════════════════════════════════════
     # 4. 初始化 TaskBuilder
@@ -323,7 +476,7 @@ def main():
     # 4.5 初始化外部坐标输入服务器（可选）
     # ═════════════════════════════════════════════════════════════════════════
     input_server = None
-    if args.ext_input:
+    if mode == RecognitionMode.MANUAL:
         input_server = ExternalInputServer(
             host=args.ext_host, port=args.ext_port
         )
@@ -334,11 +487,15 @@ def main():
                 input_server.url
             )
         except OSError as e:
-            logger.warning(
-                "无法启动外部坐标服务器: %s (端口 %d 可能被占用)，将仅使用摄像头输入",
+            logger.error(
+                "无法启动外部坐标服务器: %s (端口 %d 可能被占用)",
                 e, args.ext_port
             )
-            input_server = None
+            logger.error("手动输入模式需要 HTTP 服务器，程序退出。")
+            client.close()
+            if camera is not None:
+                camera.stop()
+            sys.exit(1)
 
     # ═════════════════════════════════════════════════════════════════════════
     # 5. 主循环
@@ -350,11 +507,10 @@ def main():
     grasp_count = 0          # 抓取计数
     last_time = 0            # 上次抓取时间
     server_ok = True         # 服务器连接状态
-    external_active = False  # 当前帧是否使用外部输入坐标
 
     logger.info("进入主循环 — 放物块即自动识别并发送仿真任务，q/ESC 退出")
     print("\n" + "=" * 60)
-    print("  仿真模式运行中")
+    print(f"  仿真模式运行中 [{mode.value.upper()}]")
     print(f"  服务器: {args.server}")
     print("  放物块 → 自动识别 → POST 仿真任务 → 循环")
     print("  q / ESC → 退出")
@@ -385,32 +541,59 @@ def main():
         # ── GGCNN 推理 ──
         eef_pose = get_sim_eef_pose_m()
 
-        # ── 确定抓取目标：外部输入优先，否则使用 GGCNN 推理 ──
+        # ── 确定抓取目标：按识别模式走单一路径 ──
         goal = None
         stable = False
 
-        if input_server is not None:
+        if mode == RecognitionMode.MANUAL:
+            # ── 手动输入模式：仅从外部 HTTP 服务器取坐标 ──
             external_target = input_server.get_target()
-            if external_target is not None:
-                logger.info(
-                    "使用外部输入坐标: X=%.1f Y=%.1f Z=%.1f Roll=%.1f Yaw=%.1f",
-                    external_target[0], external_target[1],
-                    external_target[2], external_target[3],
-                    external_target[5]
-                )
-                goal = external_target
-                stable = True
-                cand_buf.clear()
-                external_active = True
-                # 外部输入模式下的热力图占位符
-                grasp_img = np.zeros((cs, cs, 3), dtype=np.uint8)
-                cv2.putText(grasp_img, "EXTERNAL", (cs // 3, cs // 2),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-                cv2.putText(grasp_img, "TARGET", (cs // 3, cs // 2 + 30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-        if goal is None:
-            # 摄像头 → GGCNN 推理管线
+            # 默认占位图（等待 / 未命中）
+            grasp_img = np.zeros((cs, cs, 3), dtype=np.uint8)
+            cv2.putText(grasp_img, "WAITING", (cs // 3, cs // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            cv2.putText(grasp_img, "FOR INPUT", (cs // 3, cs // 2 + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            if external_target is not None:
+                # ── 校验外部坐标 ──
+                valid, corrected, reason = validate_grasp_target(
+                    external_target, logger
+                )
+                if not valid:
+                    logger.warning(
+                        "外部坐标校验失败 — %s — 已丢弃: %s",
+                        reason, external_target
+                    )
+                else:
+                    if corrected != external_target:
+                        logger.info(
+                            "外部坐标已修正: %s → X=%.1f Y=%.1f Z=%.1f Yaw=%.1f",
+                            reason, corrected[0], corrected[1],
+                            corrected[2], corrected[5]
+                        )
+                    else:
+                        logger.info(
+                            "使用外部输入坐标: X=%.1f Y=%.1f Z=%.1f Roll=%.1f Yaw=%.1f",
+                            corrected[0], corrected[1],
+                            corrected[2], corrected[3],
+                            corrected[5]
+                        )
+                    goal = corrected
+                    stable = True
+                    cand_buf.clear()
+                    # 命中目标：占位图切换为 MANUAL INPUT
+                    cv2.putText(grasp_img, "MANUAL", (cs // 3, cs // 2),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                    cv2.putText(grasp_img, "INPUT", (cs // 3, cs // 2 + 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+            # 手动模式：color_crop 仅用于显示
+            color_crop = color_image[off_r:off_r+cs, off_c:off_c+cs].copy()
+
+        else:
+            # ── 摄像头识别模式：GGCNN 推理管线 ──
             grasp_img, result = ggcnn.get_grasp_img(depth_image, K, eef_pose[2])
 
             color_crop = color_image[off_r:off_r+cs, off_c:off_c+cs].copy()
@@ -441,16 +624,13 @@ def main():
                 )
             else:
                 cand_buf.clear()
-        else:
-            # 外部输入模式：color_crop 仍然需要用于显示
-            color_crop = color_image[off_r:off_r+cs, off_c:off_c+cs].copy()
 
         # ── 状态栏 ──
-        sim_label = "EXTERNAL MODE" if external_active else "SIMULATION MODE"
+        mode_label = "MANUAL INPUT" if mode == RecognitionMode.MANUAL else "GGCNN"
         if server_ok:
-            status = f"{sim_label} | "
+            status = f"{mode_label} | "
         else:
-            status = f"{sim_label} [SERVER DOWN] | "
+            status = f"{mode_label} [SERVER DOWN] | "
         status += f"{'LOCKED' if stable else ('SEARCHING' if goal is not None else 'NO OBJECT')}"
         status += f" | grasped:{grasp_count}"
 
@@ -511,7 +691,6 @@ def main():
             # 重置状态
             last_time = time.monotonic()
             cand_buf.clear()
-            external_active = False
 
     # ═════════════════════════════════════════════════════════════════════════
     # 6. 清理
