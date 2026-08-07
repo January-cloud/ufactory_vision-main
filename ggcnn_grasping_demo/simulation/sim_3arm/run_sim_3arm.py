@@ -39,12 +39,12 @@ for _p in (_sim_3arm_dir, _simulation_dir, _demo_dir):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from simulation_client import SimulationClient
-from global_camera import GlobalCamera
+from simulation.simulation_client import SimulationClient
+from simulation.global_camera import GlobalCamera
 
-from sim_coordinator import SimCoordinator, load_sim_config
-from sim_arm_controller import SimArmController
-from sim_visualizer import SimVisualizer
+from simulation.sim_3arm.sim_coordinator import SimCoordinator, load_sim_config
+from simulation.sim_3arm.sim_arm_controller import SimArmController
+from simulation.sim_3arm.sim_visualizer import SimVisualizer
 
 
 def setup_logging(log_dir: str):

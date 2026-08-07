@@ -49,7 +49,7 @@ if _parent_dir not in sys.path:
 from grasp.ggcnn_torch import TorchGGCNN
 from grasp.helpers.matrix_funcs import euler2mat, convert_pose
 from multi_arm.dominant_cluster import dominant_cluster
-from task_builder import TaskBuilder, SimGraspConfig
+from simulation.task_builder import TaskBuilder, SimGraspConfig
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 配置参数 (与 run_simulation.py 一致)

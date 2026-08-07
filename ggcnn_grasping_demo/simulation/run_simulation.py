@@ -48,11 +48,11 @@ from grasp.ggcnn_torch import TorchGGCNN
 from grasp.helpers.matrix_funcs import euler2mat, convert_pose
 
 # simulation 包内的模块
-from simulation_client import SimulationClient, SimulationClientError
-from task_builder import TaskBuilder, SimGraspConfig
-from sim_camera import SimCamera
-from builtin_camera import BuiltinCamera
-from external_input import ExternalInputServer
+from simulation.simulation_client import SimulationClient, SimulationClientError
+from simulation.task_builder import TaskBuilder, SimGraspConfig
+from simulation.sim_camera import SimCamera
+from simulation.builtin_camera import BuiltinCamera
+from simulation.external_input import ExternalInputServer
 
 # 引入 dominant_cluster（位于 multi_arm 包内）
 from multi_arm.dominant_cluster import dominant_cluster

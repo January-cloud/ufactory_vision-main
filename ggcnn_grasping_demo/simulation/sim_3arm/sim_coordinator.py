@@ -18,7 +18,7 @@ import time
 import threading
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 # ── 包内路径引导：保证能 import 到 simulation 与 multi_arm ──
 _sim_3arm_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,7 +28,7 @@ for _p in (_simulation_dir, _demo_dir):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from simulation_client import SimulationClient, SimulationClientError
+from simulation.simulation_client import SimulationClient, SimulationClientError
 from multi_arm.config import SystemConfig, ArmConfig, load_config
 from multi_arm.coordinator import MultiArmCoordinator
 
@@ -290,4 +290,4 @@ if __name__ == '__main__':
     print("    [PASS]")
 
     coord.close()
-    print(f"\n自测完成 [PASS]")
+    print("\n自测完成 [PASS]")

@@ -20,6 +20,10 @@ sim_3arm — 三臂协同仿真包
 import os
 import sys
 
+from simulation.sim_3arm.sim_arm_controller import SimArmController
+from simulation.sim_3arm.sim_coordinator import SimSystemConfig, SimCoordinator, load_sim_config
+from simulation.sim_3arm.sim_visualizer import SimVisualizer
+
 # 将 simulation/ 目录和 ggcnn_grasping_demo/ 目录加入 sys.path，
 # 保证直接运行 sim_3arm/ 下脚本时能 import 到：
 #   simulation_client / task_builder / builtin_camera / global_camera

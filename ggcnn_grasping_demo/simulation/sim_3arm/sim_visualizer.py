@@ -38,8 +38,8 @@ for _p in (_sim_3arm_dir, _simulation_dir, _demo_dir):
 
 from multi_arm.config import SystemConfig
 from multi_arm.collision_avoidance import interarm_distance
-from global_camera import GlobalCamera
-from sim_coordinator import SimCoordinator
+from simulation.global_camera import GlobalCamera
+from simulation.sim_3arm.sim_coordinator import SimCoordinator
 
 
 logger = logging.getLogger(__name__)
@@ -322,9 +322,9 @@ if __name__ == '__main__':
     print("SimVisualizer 自测")
     print("=" * 60)
 
-    from sim_coordinator import load_sim_config, SimCoordinator
-    from sim_arm_controller import SimArmController
-    from simulation_client import SimulationClient
+    from simulation.sim_3arm.sim_coordinator import load_sim_config
+    from simulation.sim_3arm.sim_arm_controller import SimArmController
+    from simulation.simulation_client import SimulationClient
 
     cfg_path = os.path.join(_simulation_dir, 'config_sim_3arms.json')
     sim_cfg = load_sim_config(cfg_path)
@@ -371,4 +371,4 @@ if __name__ == '__main__':
     viz.join(timeout=3.0)
 
     coord.close()
-    print(f"\n自测完成 [PASS]")
+    print("\n自测完成 [PASS]")

@@ -36,19 +36,18 @@ for _p in (_sim_3arm_dir, _simulation_dir, _demo_dir):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from camera.utils import get_combined_img
 from grasp.ggcnn_torch import TorchGGCNN
 from grasp.helpers.matrix_funcs import euler2mat, convert_pose
 
-from task_builder import TaskBuilder, SimGraspConfig
-from builtin_camera import BuiltinCamera
-from sim_camera import SimCamera
-from simulation_client import SimulationClient
+from simulation.task_builder import TaskBuilder, SimGraspConfig
+from simulation.builtin_camera import BuiltinCamera
+from simulation.sim_camera import SimCamera
+from simulation.simulation_client import SimulationClient
 
 from multi_arm.config import ArmConfig, ArmState
 from multi_arm.dominant_cluster import dominant_cluster
 from multi_arm.collision_avoidance import point_in_zone
-from sim_coordinator import SimCoordinator, SimSystemConfig
+from simulation.sim_3arm.sim_coordinator import SimCoordinator, SimSystemConfig
 
 
 logger = logging.getLogger(__name__)
@@ -461,7 +460,7 @@ class SimArmController:
             self, goal: List[float]) -> Optional[List[float]]:
         """当目标在协调区但无法获取权限时，尝试将抓取点微调到独占区内。"""
         cfg = self._cfg
-        x, y = goal[0], goal[1]
+        y = goal[1]
         zone = cfg.workspace_zone
         margin = 30.0
 
@@ -512,8 +511,7 @@ if __name__ == '__main__':
     print("SimArmController 自测")
     print("=" * 60)
 
-    from sim_coordinator import load_sim_config, SimCoordinator
-    from simulation_client import SimulationClient
+    from simulation.sim_3arm.sim_coordinator import load_sim_config
 
     cfg_path = os.path.join(_simulation_dir, 'config_sim_3arms.json')
     sim_cfg = load_sim_config(cfg_path)
@@ -545,4 +543,4 @@ if __name__ == '__main__':
     assert not ctrl._thread.is_alive(), "线程未退出"
 
     coord.close()
-    print(f"\n自测完成 [PASS]")
+    print("\n自测完成 [PASS]")
