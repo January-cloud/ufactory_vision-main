@@ -31,7 +31,7 @@ import queue
 import socket
 import threading
 import logging
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 logger = logging.getLogger(__name__)
@@ -130,21 +130,24 @@ class _GraspTargetHandler(BaseHTTPRequestHandler):
         label = body.get('label', None)
 
         target = [x, y, z, roll, pitch, yaw]
+        # 携带 label（物体类型，用于任务切换）；None 表示未指定
+        entry = (target, label)
 
         # 放入队列
         if self._shared_queue is not None:
             try:
-                self._shared_queue.put_nowait(target)
+                self._shared_queue.put_nowait(entry)
                 qsize = self._shared_queue.qsize()
                 logger.info(
-                    "外部坐标已接收: X=%.1f Y=%.1f Z=%.1f Yaw=%.1f (队列: %d)",
-                    x, y, z, yaw, qsize
+                    "外部坐标已接收: X=%.1f Y=%.1f Z=%.1f Yaw=%.1f "
+                    "label=%s (队列: %d)",
+                    x, y, z, yaw, label, qsize
                 )
             except queue.Full:
                 # 队列满 → 丢弃最旧的目标，放入新的
                 try:
                     self._shared_queue.get_nowait()
-                    self._shared_queue.put_nowait(target)
+                    self._shared_queue.put_nowait(entry)
                     logger.warning("外部坐标队列已满，已丢弃最旧目标")
                     self._send_json(200, {
                         'status': 'ok',
@@ -297,19 +300,38 @@ class ExternalInputServer:
     # ── 目标获取 ────────────────────────────────────────────────────────────
 
     def get_target(self) -> Optional[List[float]]:
-        """非阻塞获取最新外部坐标。
+        """非阻塞获取最新外部坐标（兼容旧接口，仅返回坐标）。
 
         一次性清空队列中的所有目标，只返回最新的（丢弃中间过时的坐标）。
-        这样外部系统可以快速连续发送坐标，而系统始终使用最新值。
 
         返回:
             [X, Y, Z, Roll, Pitch, Yaw] 列表 (mm/度)，或 None 如果队列为空
         """
+        latest = self._drain_latest()
+        if latest is None:
+            return None
+        return latest[0]
+
+    def get_target_with_label(self) -> Optional[Tuple[List[float], Optional[str]]]:
+        """非阻塞获取最新外部坐标及其 label（物体类型）。
+
+        返回:
+            (target, label) 元组，label 可能为 None；队列为空返回 None
+        """
+        return self._drain_latest()
+
+    def _drain_latest(self) -> Optional[Tuple[List[float], Optional[str]]]:
+        """清空队列并返回最新 (target, label)；队列为空返回 None。"""
         latest = None
         drained = 0
         while True:
             try:
-                latest = self._queue.get_nowait()
+                entry = self._queue.get_nowait()
+                # 兼容旧格式（纯坐标列表）与新格式 ((target, label))
+                if isinstance(entry, tuple) and len(entry) == 2:
+                    latest = entry
+                else:
+                    latest = (entry, None)
                 drained += 1
             except queue.Empty:
                 break

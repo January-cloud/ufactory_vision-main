@@ -162,13 +162,45 @@ class BuiltinCamera:
         logger.info("物体列表已更新: %d 个物体", len(self._objects))
 
     def add_object(self, cx: float, cy: float, size_x: float, size_y: float,
-                   height_m: float):
+                   height_m: float, object_type: Optional[str] = None):
         """向场景中添加一个物体。"""
-        self._objects.append({
+        obj = {
             "cx": cx, "cy": cy,
             "size_x": size_x, "size_y": size_y,
             "height_m": height_m,
-        })
+        }
+        if object_type:
+            obj["object_type"] = object_type
+        self._objects.append(obj)
+
+    def remove_object(self, object_type: Optional[str] = None,
+                      cx: Optional[float] = None, cy: Optional[float] = None,
+                      radius_px: float = 30.0) -> bool:
+        """从场景中移除一个物体（抓取成功后调用，模拟物块被取走）。
+
+        优先按 object_type 精确匹配；否则按像素位置最近匹配。
+        返回是否成功移除。
+        """
+        if object_type is not None:
+            for i, o in enumerate(self._objects):
+                if o.get('object_type') == object_type:
+                    del self._objects[i]
+                    logger.info("物体已移除: %s (剩余 %d 个)",
+                                object_type, len(self._objects))
+                    return True
+            return False
+        if cx is not None and cy is not None:
+            best_i, best_d = None, float('inf')
+            for i, o in enumerate(self._objects):
+                d = ((o.get('cx', 0) - cx) ** 2
+                     + (o.get('cy', 0) - cy) ** 2) ** 0.5
+                if d < best_d:
+                    best_i, best_d = i, d
+            if best_i is not None and best_d <= radius_px:
+                self._objects.pop(best_i)
+                logger.info("物体已移除(按位置): 剩余 %d 个", len(self._objects))
+                return True
+        return False
 
     def clear_objects(self):
         """清空所有物体（仅保留桌面平面）。"""

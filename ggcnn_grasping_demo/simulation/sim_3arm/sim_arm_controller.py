@@ -48,6 +48,7 @@ from multi_arm.config import ArmConfig, ArmState
 from multi_arm.dominant_cluster import dominant_cluster
 from multi_arm.collision_avoidance import point_in_zone
 from simulation.sim_3arm.sim_coordinator import SimCoordinator, SimSystemConfig
+from simulation.sim_3arm.object_mapping import ObjectMapper, task_rule_from_dict
 
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,8 @@ class SimArmController:
         self._ggcnn = None
         self._K: Optional[np.ndarray] = None
         self._builder: Optional[TaskBuilder] = None
+        self._object_mapper: ObjectMapper = ObjectMapper()
+        self._current_object_type: str = ""
 
         # 线程控制
         self._stop_event: Optional[threading.Event] = None
@@ -154,11 +157,16 @@ class SimArmController:
         return self._grasp_count
 
     def get_latest_frame(self) -> Tuple[Optional[np.ndarray],
-                                        Optional[np.ndarray], str, int]:
-        """获取最新帧数据（供 SimVisualizer 定时拉取）。"""
+                                        Optional[np.ndarray], str, str, int]:
+        """获取最新帧数据（供 SimVisualizer 定时拉取）。
+
+        返回:
+            (color, heatmap, state_label, object_type, grasp_count)
+        """
         with self._frame_lock:
             return (self._latest_color, self._latest_heatmap,
-                    self._latest_state_label, self._grasp_count)
+                    self._latest_state_label, self._current_object_type,
+                    self._grasp_count)
 
     # ═══════════════════════════════════════════════════════════════════
     # 线程主入口
@@ -238,8 +246,30 @@ class SimArmController:
             above_z=self._cfg.above_z,
             grasping_min_z=self._cfg.grasping_min_z,
         ))
+
+        # ④ 构建物体识别 → 任务切换映射
+        self._object_mapper = self._build_object_mapper()
+
         logger.info(f"Arm-{arm_id}: 初始化完成 "
-                    f"(观察位={self._cfg.detect_xyz} 释放位={self._cfg.release_xyz})")
+                    f"(观察位={self._cfg.detect_xyz} 释放位={self._cfg.release_xyz} "
+                    f"任务规则={len(self._object_mapper.rules)})")
+
+    def _build_object_mapper(self) -> ObjectMapper:
+        """从配置构建物体识别映射。
+
+        当前实现: 基于坐标最近邻匹配 (ObjectMapper.recognize)。
+        未来接入视觉识别时，只需替换 recognize() 内部实现，此处不变。
+        """
+        mapper = ObjectMapper()
+        rules_cfg = self._sim_cfg.task_rules.get(self._cfg.arm_id, {})
+        for obj_type, rule_dict in rules_cfg.items():
+            r = dict(rule_dict)
+            r['object_type'] = obj_type
+            mapper.add_rule(task_rule_from_dict(r))
+        if rules_cfg:
+            logger.info(f"Arm-{self._cfg.arm_id}: 加载物体识别规则 "
+                        f"{len(rules_cfg)} 条 → {sorted(rules_cfg.keys())}")
+        return mapper
 
     # ═══════════════════════════════════════════════════════════════════
     # 主循环
@@ -349,16 +379,25 @@ class SimArmController:
 
                     # 构建并发送任务序列
                     self._coord.update_arm_state(arm_id, ArmState.GRASPING)
-                    sequence = self._builder.build_pick_and_place(list(goal))
+                    object_type, release_xyz = self._recognize_and_select_task(
+                        goal
+                    )
+                    sequence = self._builder.build_pick_and_place(
+                        list(goal), release_xyz=release_xyz
+                    )
                     success = self._coord.send_task(arm_id, sequence)
 
                     if success:
                         self._grasp_count += 1
                         self._coord.record_grasp(arm_id)
+                        # 抓取成功后从场景移除该物块，下一轮转向其他物块
+                        if self._camera is not None and object_type:
+                            self._camera.remove_object(object_type)
                         logger.info(
                             f"Arm-{arm_id}: 抓取完成 [{self._grasp_count}] "
                             f"目标 X={goal[0]:.1f} Y={goal[1]:.1f} "
-                            f"Yaw={goal[5]:.1f}"
+                            f"Yaw={goal[5]:.1f} "
+                            f"类型={self._current_object_type or '-'}"
                         )
 
                     # 释放协调区
@@ -375,11 +414,13 @@ class SimArmController:
                                      else "NO OBJECT"))
                 cv2.putText(
                     color_crop,
-                    f"{cfg.name} | {state_label} | grasped:{self._grasp_count}",
+                    f"{cfg.name} | {state_label} | "
+                    f"{self._current_object_type or '-'} | #{self._grasp_count}",
                     (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2
                 )
 
-                self._publish_frame(color_crop, grasp_img, state_label)
+                self._publish_frame(color_crop, grasp_img, state_label,
+                                    self._current_object_type)
 
             except Exception:
                 logger.exception(f"Arm-{arm_id}: 主循环异常")
@@ -479,12 +520,41 @@ class SimArmController:
     # ═══════════════════════════════════════════════════════════════════
 
     def _publish_frame(self, color: np.ndarray, heatmap: np.ndarray,
-                       state_label: str):
+                       state_label: str, object_type: str = ""):
         """发布最新帧到缓冲区（供 SimVisualizer 线程读取）。"""
         with self._frame_lock:
             self._latest_color = color.copy() if color is not None else None
             self._latest_heatmap = heatmap.copy() if heatmap is not None else None
             self._latest_state_label = state_label
+            self._current_object_type = object_type
+
+    def _recognize_and_select_task(
+            self, goal: List[float]) -> Tuple[Optional[str],
+                                              Optional[List[float]]]:
+        """识别抓取目标对应的物体类型，并选择对应的释放位置。
+
+        参数:
+            goal: 基坐标系抓取目标 [X, Y, Z, Roll, Pitch, Yaw]
+
+        返回:
+            (object_type, release_xyz) — 未识别到返回 (None, None)，
+            调用方使用臂默认释放位。
+
+        未来接入视觉识别: 只需替换 ObjectMapper.recognize 的实现，
+        此方法无需改动。
+        """
+        rule = self._object_mapper.recognize(goal[0], goal[1])
+        if rule is None:
+            self._current_object_type = ""
+            return None, None
+        self._current_object_type = rule.object_type
+        logger.info(
+            f"Arm-{self._cfg.arm_id}: 识别到 {rule.label} "
+            f"(object_type={rule.object_type}) "
+            f"@ X={goal[0]:.1f} Y={goal[1]:.1f} → "
+            f"释放 {rule.release_xyz or self._cfg.release_xyz}"
+        )
+        return rule.object_type, rule.release_xyz
 
     def _cleanup(self):
         """清理资源：停相机、更新状态。"""
@@ -531,11 +601,15 @@ if __name__ == '__main__':
     time.sleep(5.0)
 
     # 验证帧已发布
-    color, heatmap, label, count = ctrl.get_latest_frame()
+    color, heatmap, label, obj_type, count = ctrl.get_latest_frame()
     print(f"    最新帧: color={None if color is None else color.shape} "
           f"heatmap={None if heatmap is None else heatmap.shape} "
-          f"label={label} count={count}")
+          f"label={label} obj_type={obj_type} count={count}")
     assert color is not None and heatmap is not None, "帧未被发布"
+    assert ctrl._object_mapper is not None, "ObjectMapper 未构建"
+    assert len(ctrl._object_mapper.rules) == 3, \
+        f"任务规则应为 3 条, 实际 {len(ctrl._object_mapper.rules)}"
+    print(f"    任务规则: {[r.object_type for r in ctrl._object_mapper.rules]}")
 
     print("\n[3] 停止...")
     ctrl.stop()

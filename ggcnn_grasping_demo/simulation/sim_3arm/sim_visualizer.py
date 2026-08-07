@@ -168,9 +168,9 @@ class SimVisualizer:
         # 收集所有臂的最新帧
         frames = {}
         for arm_id, ctrl in sorted(self._controllers.items()):
-            color, heatmap, label, count = ctrl.get_latest_frame()
+            color, heatmap, label, obj_type, count = ctrl.get_latest_frame()
             if color is not None:
-                frames[arm_id] = (color, heatmap, label, count)
+                frames[arm_id] = (color, heatmap, label, obj_type, count)
 
         summary = self._coord.get_summary()
 
@@ -196,9 +196,9 @@ class SimVisualizer:
                             (20, th//2), cv2.FONT_HERSHEY_SIMPLEX,
                             0.6, (255, 255, 255), 1)
             else:
-                color, heatmap, label, count = f
+                color, heatmap, label, obj_type, count = f
                 tile = self._make_arm_tile(
-                    color, heatmap, label, count,
+                    color, heatmap, label, obj_type, count,
                     arm_cfg.name if arm_cfg else f"Arm-{arm_id.arm_id}",
                     summary, tw, th
                 )
@@ -221,7 +221,7 @@ class SimVisualizer:
     # 格子弹窗
     # ═══════════════════════════════════════════════════════════════════
 
-    def _make_arm_tile(self, color, heatmap, label, count,
+    def _make_arm_tile(self, color, heatmap, label, obj_type, count,
                        arm_name, summary, tw, th) -> np.ndarray:
         """制作单臂显示块：彩色图（左）+ GGCNN 热力图（右）+ 状态文字。"""
         half_w = tw // 2
@@ -240,7 +240,8 @@ class SimVisualizer:
 
         tile = np.hstack([color_resized, heatmap_resized])
 
-        cv2.putText(tile, f"{arm_name} | {label} | #{count}",
+        obj_str = obj_type if obj_type else "-"
+        cv2.putText(tile, f"{arm_name} | {label} | [{obj_str}] | #{count}",
                     (10, h - 15), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, STATE_COLORS.get(label, (255, 255, 255)), 1)
         return tile
@@ -355,10 +356,10 @@ if __name__ == '__main__':
     # 验证各臂发布帧
     print("\n[2] 验证帧数据...")
     for ctrl in controllers:
-        color, heatmap, label, count = ctrl.get_latest_frame()
+        color, heatmap, label, obj_type, count = ctrl.get_latest_frame()
         assert color is not None, f"Arm-{ctrl._cfg.arm_id} 无帧"
         print(f"    Arm-{ctrl._cfg.arm_id}: {color.shape} label={label} "
-              f"count={count}")
+              f"obj_type={obj_type} count={count}")
     print("    [PASS]")
 
     print("\n[3] 停止...")

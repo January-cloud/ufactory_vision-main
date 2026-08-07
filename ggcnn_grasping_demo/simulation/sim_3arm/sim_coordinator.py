@@ -68,6 +68,8 @@ class SimSystemConfig:
     sim_retries: int = 2
     global_camera: GlobalCameraConfig = field(default_factory=GlobalCameraConfig)
     arm_camera_objects: Dict[int, List[Dict]] = field(default_factory=dict)
+    task_rules: Dict[int, Dict[str, dict]] = field(default_factory=dict)
+    """arm_id → {object_type → 任务规则 dict (label/position_xy/release_xyz ...)}"""
 
     # ── 便捷访问 ──
     @property
@@ -110,11 +112,14 @@ def load_sim_config(json_path: str) -> SimSystemConfig:
 
     # 每臂模拟物块 (sim_camera_objects 字段)
     arm_camera_objects = {}
+    # 每臂任务规则 (task_rules: object_type → 释放位置等)
+    task_rules = {}
     for a in raw.get('arms', []):
         aid = a.get('arm_id')
         objs = a.get('sim_camera_objects', [])
         if aid is not None:
             arm_camera_objects[aid] = objs
+            task_rules[aid] = a.get('task_rules', {})
 
     sim_cfg = SimSystemConfig(
         system_config=system_config,
@@ -123,6 +128,7 @@ def load_sim_config(json_path: str) -> SimSystemConfig:
         sim_retries=raw.get('sim_retries', 2),
         global_camera=global_camera,
         arm_camera_objects=arm_camera_objects,
+        task_rules=task_rules,
     )
 
     logger.info("已加载 %d 个臂的仿真配置 (server=%s)",

@@ -23,9 +23,15 @@
       "name": "Arm-Left",
       "robot_ip": "192.168.2.101",
       "sim_camera_objects": [
-        {"cx": 300, "cy": 220, "size_x": 55, "size_y": 50, "height_m": 0.030},
-        {"cx": 350, "cy": 260, "size_x": 50, "size_y": 45, "height_m": 0.025}
+        {"cx": 300, "cy": 220, "size_x": 55, "size_y": 50, "height_m": 0.030, "object_type": "part_a"},
+        {"cx": 350, "cy": 260, "size_x": 50, "size_y": 45, "height_m": 0.025, "object_type": "part_b"},
+        {"cx": 400, "cy": 240, "size_x": 50, "size_y": 45, "height_m": 0.028, "object_type": "part_c"}
       ],
+      "task_rules": {
+        "part_a": {"label": "Part A", "position_xy": [280.7, -149.8], "match_radius_mm": 30, "release_xyz": [150, -420, 83]},
+        "part_b": {"label": "Part B", "position_xy": [249.2, -187.7], "match_radius_mm": 30, "release_xyz": [150, -275, 83]},
+        "part_c": {"label": "Part C", "position_xy": [264.0, -226.2], "match_radius_mm": 30, "release_xyz": [150, -130, 83]}
+      },
       "euler_eef_to_color_opt": [0.067052, -0.031138, 0.021611, -0.004202, -0.008484, 1.589877],
       "euler_color_to_depth_opt": [0, 0, 0, 0, 0, 0],
       "workspace_zone": [100, 500, -450, -100],
@@ -59,9 +65,15 @@
       "name": "Arm-Center",
       "robot_ip": "192.168.2.102",
       "sim_camera_objects": [
-        {"cx": 310, "cy": 240, "size_x": 55, "size_y": 50, "height_m": 0.030},
-        {"cx": 360, "cy": 200, "size_x": 50, "size_y": 45, "height_m": 0.028}
+        {"cx": 310, "cy": 240, "size_x": 55, "size_y": 50, "height_m": 0.030, "object_type": "part_a"},
+        {"cx": 360, "cy": 200, "size_x": 50, "size_y": 45, "height_m": 0.028, "object_type": "part_b"},
+        {"cx": 400, "cy": 240, "size_x": 50, "size_y": 45, "height_m": 0.025, "object_type": "part_c"}
       ],
+      "task_rules": {
+        "part_a": {"label": "Part A", "position_xy": [265.3, 42.8], "match_radius_mm": 30, "release_xyz": [225, -60, 83]},
+        "part_b": {"label": "Part B", "position_xy": [295.3, 3.9], "match_radius_mm": 30, "release_xyz": [225, 0, 83]},
+        "part_c": {"label": "Part C", "position_xy": [264.0, -26.6], "match_radius_mm": 30, "release_xyz": [225, 60, 83]}
+      },
       "euler_eef_to_color_opt": [0.067052, -0.031138, 0.021611, -0.004202, -0.008484, 1.589877],
       "euler_color_to_depth_opt": [0, 0, 0, 0, 0, 0],
       "workspace_zone": [100, 500, -100, 100],
@@ -98,9 +110,15 @@
       "name": "Arm-Right",
       "robot_ip": "192.168.2.103",
       "sim_camera_objects": [
-        {"cx": 320, "cy": 220, "size_x": 55, "size_y": 50, "height_m": 0.030},
-        {"cx": 280, "cy": 260, "size_x": 50, "size_y": 45, "height_m": 0.025}
+        {"cx": 320, "cy": 220, "size_x": 55, "size_y": 50, "height_m": 0.030, "object_type": "part_a"},
+        {"cx": 280, "cy": 260, "size_x": 50, "size_y": 45, "height_m": 0.025, "object_type": "part_b"},
+        {"cx": 360, "cy": 220, "size_x": 50, "size_y": 45, "height_m": 0.028, "object_type": "part_c"}
       ],
+      "task_rules": {
+        "part_a": {"label": "Part A", "position_xy": [280.4, 234.9], "match_radius_mm": 30, "release_xyz": [250, 130, 83]},
+        "part_b": {"label": "Part B", "position_xy": [250.3, 266.4], "match_radius_mm": 30, "release_xyz": [250, 275, 83]},
+        "part_c": {"label": "Part C", "position_xy": [279.9, 204.2], "match_radius_mm": 30, "release_xyz": [250, 420, 83]}
+      },
       "euler_eef_to_color_opt": [0.067052, -0.031138, 0.021611, -0.004202, -0.008484, 1.589877],
       "euler_color_to_depth_opt": [0, 0, 0, 0, 0, 0],
       "workspace_zone": [100, 500, 100, 450],

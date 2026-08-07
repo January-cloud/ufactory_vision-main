@@ -84,13 +84,17 @@ class TaskBuilder:
 
     # ── 公开方法 ──────────────────────────────────────────────────────────────
 
-    def build_pick_and_place(self, grasp_target: List[float]) -> list:
+    def build_pick_and_place(self, grasp_target: List[float],
+                             release_xyz: Optional[List[float]] = None) -> list:
         """根据抓取目标构建完整的 pick-and-place 任务序列。
 
         参数:
             grasp_target: [X, Y, Z, Roll, Pitch, Yaw] — 基坐标系抓取目标
                           X, Y, Z 单位 mm，Roll, Pitch, Yaw 单位度
                           典型值: [230, -50, 85, 180, 0, -30]
+            release_xyz:  可选，覆盖默认释放位置 [x, y, z] mm。
+                          用于按物体类型切换释放位置（不同任务放到不同料位）。
+                          None 时使用 self.config.release_xyz。
 
         返回:
             任务 dict 列表，每项包含 type, params, wait 字段
@@ -115,7 +119,10 @@ class TaskBuilder:
         grasp_z = max(Z, cfg.grasping_min_z)
 
         detect_z = cfg.detect_xyz[2]
-        release_x, release_y, release_z = cfg.release_xyz
+        if release_xyz is not None:
+            release_x, release_y, release_z = release_xyz
+        else:
+            release_x, release_y, release_z = cfg.release_xyz
 
         sequence = []
 
