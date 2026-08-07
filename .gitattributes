@@ -1,0 +1,20 @@
+# 统一行尾风格 — 跨平台 Python 项目标准
+* text=auto
+
+# 源码与配置：仓库中始终保留 LF（Unix 风格），避免 Windows 检出时 CRLF 导致的差异
+*.py  text eol=lf
+*.md  text eol=lf
+*.json text eol=lf
+*.sh  text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# 二进制文件：禁止 Git 触碰行尾（否则会损坏文件）
+*.pth  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.pdf  binary
+*.doc  binary
+*.docx binary
+*.gif  binary
