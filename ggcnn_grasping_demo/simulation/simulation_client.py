@@ -11,6 +11,7 @@ import time
 import json
 import logging
 import requests
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +106,13 @@ class SimulationClient:
             logger.warning("仿真服务器检查异常: %s", e)
             return False
 
-    def post_task(self, sequence: list) -> dict:
+    def post_task(self, sequence: list, arm_id: Optional[int] = None) -> dict:
         """向仿真服务器 POST 任务序列。
 
         参数:
             sequence: 任务列表，每项为 {"type": ..., "params": {...}, "wait": ...}
+            arm_id:   机械臂编号。多臂模式下用于标识任务归属的臂；
+                      为 None 时保持向后兼容单臂模式（payload 不含 arm_id）。
 
         返回:
             服务器响应的 JSON dict
@@ -120,6 +123,8 @@ class SimulationClient:
             SimulationHTTPError        服务器返回 4xx/5xx
         """
         payload = {"sequence": sequence}
+        if arm_id is not None:
+            payload["arm_id"] = arm_id
         last_error = None
 
         for attempt in range(self.retries + 1):

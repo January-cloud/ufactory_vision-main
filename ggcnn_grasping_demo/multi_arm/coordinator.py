@@ -87,7 +87,9 @@ class MultiArmCoordinator:
 
     def __init__(self, config: SystemConfig):
         self._config = config
-        self._lock = threading.Lock()
+        # 使用可重入锁 (RLock)：get_summary() 在持锁状态下调用 any_hazard()
+        # 等公开方法，普通 Lock 会导致同线程二次加锁死锁。
+        self._lock = threading.RLock()
         self._condition = threading.Condition(self._lock)
 
         # ── 臂状态 ──

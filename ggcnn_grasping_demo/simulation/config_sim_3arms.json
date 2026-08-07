@@ -1,0 +1,132 @@
+{
+  "sim_server_url": "http://192.168.1.121:8080",
+  "sim_timeout": 15.0,
+  "sim_retries": 2,
+  "win_name": "3-Arm SIMULATION",
+
+  "global_camera": {
+    "width": 640,
+    "height": 480,
+    "table_depth_m": 0.50,
+    "noise_std_m": 0.0015,
+    "jitter_px": 3.0,
+    "objects": [
+      {"cx": 200, "cy": 200, "size_x": 50, "size_y": 45, "height_m": 0.030},
+      {"cx": 320, "cy": 240, "size_x": 45, "size_y": 40, "height_m": 0.025},
+      {"cx": 440, "cy": 200, "size_x": 50, "size_y": 45, "height_m": 0.028}
+    ]
+  },
+
+  "arms": [
+    {
+      "arm_id": 0,
+      "name": "Arm-Left",
+      "robot_ip": "192.168.2.101",
+      "sim_camera_objects": [
+        {"cx": 300, "cy": 220, "size_x": 55, "size_y": 50, "height_m": 0.030},
+        {"cx": 350, "cy": 260, "size_x": 50, "size_y": 45, "height_m": 0.025}
+      ],
+      "euler_eef_to_color_opt": [0.067052, -0.031138, 0.021611, -0.004202, -0.008484, 1.589877],
+      "euler_color_to_depth_opt": [0, 0, 0, 0, 0, 0],
+      "workspace_zone": [100, 500, -450, -100],
+      "coordination_zones": [[100, 500, -150, -50]],
+      "detect_xyz": [200, -200, 380],
+      "release_xyz": [150, -350, 83],
+      "cam_width": 640,
+      "cam_height": 480,
+      "model_file": "",
+      "gripper_z_mm": 55,
+      "grasping_min_z": 70,
+      "above_z": 300,
+      "min_result_z_mm": 200,
+      "move_speed": 150,
+      "descend_speed": 80,
+      "cand_window": 12,
+      "cand_bin_mm": 8,
+      "cand_min_frames": 6,
+      "fine_frames": 20,
+      "fine_frame_interval": 0.02,
+      "bin_mm": 3,
+      "stay_sec_after_move": 1.0,
+      "suction_wait_ms": 800,
+      "grasp_retry": 2,
+      "ti0_ok_value": 1,
+      "cooldown_sec": 1.0
+    },
+
+    {
+      "arm_id": 1,
+      "name": "Arm-Center",
+      "robot_ip": "192.168.2.102",
+      "sim_camera_objects": [
+        {"cx": 310, "cy": 240, "size_x": 55, "size_y": 50, "height_m": 0.030},
+        {"cx": 360, "cy": 200, "size_x": 50, "size_y": 45, "height_m": 0.028}
+      ],
+      "euler_eef_to_color_opt": [0.067052, -0.031138, 0.021611, -0.004202, -0.008484, 1.589877],
+      "euler_color_to_depth_opt": [0, 0, 0, 0, 0, 0],
+      "workspace_zone": [100, 500, -100, 100],
+      "coordination_zones": [
+        [100, 500, -150, -50],
+        [100, 500, 50, 150]
+      ],
+      "detect_xyz": [200, 0, 380],
+      "release_xyz": [225, -89, 83],
+      "cam_width": 640,
+      "cam_height": 480,
+      "model_file": "",
+      "gripper_z_mm": 55,
+      "grasping_min_z": 70,
+      "above_z": 300,
+      "min_result_z_mm": 200,
+      "move_speed": 150,
+      "descend_speed": 80,
+      "cand_window": 12,
+      "cand_bin_mm": 8,
+      "cand_min_frames": 6,
+      "fine_frames": 20,
+      "fine_frame_interval": 0.02,
+      "bin_mm": 3,
+      "stay_sec_after_move": 1.0,
+      "suction_wait_ms": 800,
+      "grasp_retry": 2,
+      "ti0_ok_value": 1,
+      "cooldown_sec": 1.0
+    },
+
+    {
+      "arm_id": 2,
+      "name": "Arm-Right",
+      "robot_ip": "192.168.2.103",
+      "sim_camera_objects": [
+        {"cx": 320, "cy": 220, "size_x": 55, "size_y": 50, "height_m": 0.030},
+        {"cx": 280, "cy": 260, "size_x": 50, "size_y": 45, "height_m": 0.025}
+      ],
+      "euler_eef_to_color_opt": [0.067052, -0.031138, 0.021611, -0.004202, -0.008484, 1.589877],
+      "euler_color_to_depth_opt": [0, 0, 0, 0, 0, 0],
+      "workspace_zone": [100, 500, 100, 450],
+      "coordination_zones": [[100, 500, 50, 150]],
+      "detect_xyz": [200, 200, 380],
+      "release_xyz": [250, 350, 83],
+      "cam_width": 640,
+      "cam_height": 480,
+      "model_file": "",
+      "gripper_z_mm": 55,
+      "grasping_min_z": 70,
+      "above_z": 300,
+      "min_result_z_mm": 200,
+      "move_speed": 150,
+      "descend_speed": 80,
+      "cand_window": 12,
+      "cand_bin_mm": 8,
+      "cand_min_frames": 6,
+      "fine_frames": 20,
+      "fine_frame_interval": 0.02,
+      "bin_mm": 3,
+      "stay_sec_after_move": 1.0,
+      "suction_wait_ms": 800,
+      "grasp_retry": 2,
+      "ti0_ok_value": 1,
+      "cooldown_sec": 1.0
+    }
+  ]
+}

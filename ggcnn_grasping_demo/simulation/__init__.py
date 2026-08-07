@@ -26,16 +26,19 @@ simulation — 仿真接口模块
     SimGraspConfig        - 仿真抓取配置数据类
     SimCamera             - 仿真摄像头适配器（HTTP → numpy）
     BuiltinCamera         - 本地合成摄像头（零依赖）
+    GlobalCamera          - 全局俯瞰摄像头（覆盖三臂工作区）
     ExternalInputServer   - 外部坐标输入 HTTP 服务器
 
 脚本:
     run_simulation.py - 单臂仿真模式主入口
+    sim_3arm/         - 三臂协同仿真包 (run_sim_3arm.py 主入口)
 """
 
 from .simulation_client import SimulationClient, SimulationClientError
 from .task_builder import TaskBuilder, SimGraspConfig
 from .sim_camera import SimCamera
 from .builtin_camera import BuiltinCamera
+from .global_camera import GlobalCamera
 from .external_input import ExternalInputServer
 
 __all__ = [
@@ -45,5 +48,6 @@ __all__ = [
     'SimGraspConfig',
     'SimCamera',
     'BuiltinCamera',
+    'GlobalCamera',
     'ExternalInputServer',
 ]
