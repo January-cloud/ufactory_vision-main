@@ -165,7 +165,8 @@ config_3arms.json → SystemConfig
 | `sim_coordinator.py` | **★ 仿真协调器**。薄封装 `MultiArmCoordinator`，增加共享 `SimulationClient`、任务发送串行化（每臂锁 + 全局冷却）、`load_sim_config()` 仿真配置加载 |
 | `sim_arm_controller.py` | **★ 单臂仿真控制线程**。每臂独立运行：BuiltinCamera/SimCamera → GGCNN 模型 → TaskBuilder。一段式抓取管线（观察→聚类→锁定→POST /task），功能等价于真机 `ArmController` 但通过 HTTP 通信 |
 | `sim_visualizer.py` | **★ 多臂+全局摄像头可视化**。独立渲染线程，2×2 布局：Arm-0 / Arm-1 / Arm-2 / 全局摄像头+状态面板。支持 q=退出 / r=清除HAZARD / s=打印状态 |
-| `run_sim_3arm.py` | **★ 三臂仿真主启动入口**。加载配置→连接仿真服务器→创建全局摄像头→创建 SimCoordinator→创建 3 个 SimArmController→启动可视化→等待退出 |
+| `task_recorder.py` | **★ 生产任务落盘记录器（新）**。线程安全地以 JSON Lines 格式将每次发送的生产任务（识别物体、抓取目标、释放位置、10 步动作序列、发送结果）追加写入磁盘，崩溃不丢数据 |
+| `run_sim_3arm.py` | **★ 三臂仿真主启动入口**。加载配置→创建任务落盘记录器→连接仿真服务器→创建全局摄像头→创建 SimCoordinator→创建 3 个 SimArmController→启动可视化→等待退出 |
 
 ---
 
@@ -298,12 +299,14 @@ config_3arms.json → SystemConfig
 
 ```
 步骤 1  加载配置
-        └─ load_sim_config("config_sim_3arms.json") → SimSystemConfig
+        ├─ load_sim_config("config_sim_3arms.json") → SimSystemConfig
+        └─ 创建 TaskRecorder 生产任务落盘记录器（默认 logs/tasks_<时间>.jsonl）
 
 步骤 2  初始化仿真基础设施
         ├─ SimulationClient（所有臂共享同一 HTTP 会话）
         ├─ GlobalCamera（俯瞰全部三臂工作区的鸟瞰摄像头）
         └─ SimCoordinator（包装 MultiArmCoordinator，复用区域/安全管理逻辑）
+           └─ 挂载 TaskRecorder → 任务落盘能力
 
 步骤 3  创建 3 个 SimArmController（每个在独立线程中）
         ├─ Thread-0 (Arm-Left):  BuiltinCamera → GGCNN2 → TaskBuilder → main_loop
@@ -316,7 +319,9 @@ config_3arms.json → SystemConfig
         │   ├─ 独占区 → 直接构建任务序列
         │   └─ 协调区 → request_zone() 获锁后构建
         ├─ TaskBuilder.build_pick_and_place() 构建 10 步序列
-        ├─ coordinator.send_task(arm_id, seq) → POST /task（串行化 + 全局冷却）
+        ├─ coordinator.send_task(arm_id, seq, meta) → POST /task（串行化 + 全局冷却）
+        │   └─ 每次发送后由 TaskRecorder 落盘（JSON Lines：物体类型/抓取目标/
+        │      释放位置/10 步动作序列/发送结果，成功与失败均记录）
         ├─ 释放协调区 → 回到循环
         └─ 每帧：更新 Coordinator 状态 + 虚拟末端位姿
 
@@ -337,7 +342,8 @@ config_3arms.json → SystemConfig
         └─ 区域租约过期检查（30s 未续约 → 自动回收）
 
 步骤 6  按 q/ESC 退出
-        └─ broadcast_stop() → 控制器停止 → 可视化停止 → 打印统计
+        └─ broadcast_stop() → 控制器停止 → 可视化停止
+           → 关闭 TaskRecorder 并打印落盘任务数 → 打印抓取统计
 ```
 
 ### 4.5 数据在各阶段之间的流转格式
@@ -406,6 +412,12 @@ python run_sim_3arm.py --sim-camera
 
 # 无相机模式（虚拟深度图，仅测试线程/通信链路）
 python run_sim_3arm.py --no-camera
+
+# 自定义生产任务落盘路径（默认 logs/tasks_<时间>.jsonl）
+python run_sim_3arm.py --task-log logs/tasks.jsonl
+
+# 禁用生产任务落盘
+python run_sim_3arm.py --no-task-log
 ```
 
 ### 单臂真实抓取
@@ -470,6 +482,7 @@ python run_3arm_grasp.py
 - **碰撞检测**：运行前确保已启用碰撞检测，建议灵敏度设为 3 或更高
 - **仿真模式**默认使用本地合成摄像头，如需连接仿真服务器获取图像，使用 `--sim-camera`
 - **三臂仿真** (`sim_3arm/`) 结构与真机 `multi_arm/` 对齐：每臂独立摄像头 + GGCNN 模型 + 全局俯瞰摄像头，支持与单臂仿真相同的三种摄像头模式 (`--sim-camera` / `--no-camera` / 默认本地合成)
+- **生产任务落盘** (`sim_3arm/`)：默认将每次发送的生产任务以 JSON Lines 格式写入 `sim_3arm/logs/tasks_<时间>.jsonl`（含识别物体类型、抓取目标、释放位置、10 步动作序列、发送结果，成功与失败均记录），可用 `--task-log` 指定路径、`--no-task-log` 关闭。每次抓取完成后可复用该文件做产量/良率统计
 
 ---
 

@@ -12,11 +12,13 @@ run_sim_3arm — 三臂协同仿真启动器
     python run_sim_3arm.py --sim-camera          # 从仿真服务器获取每臂图像
     python run_sim_3arm.py --no-camera           # 无相机测试模式 (免 GGCNN/服务器)
     python run_sim_3arm.py --config config_sim_3arms.json
+    python run_sim_3arm.py --task-log my_tasks.jsonl   # 自定义任务落盘路径
+    python run_sim_3arm.py --no-task-log               # 禁用生产任务落盘
 
 流程:
-    加载配置 → 连接仿真服务器 → 创建全局摄像头 → 创建 SimCoordinator →
-    创建 3× SimArmController → 创建 SimVisualizer → 启动全部线程 →
-    等待退出 → 清理并打印统计。
+    加载配置 → 创建任务落盘记录器 → 连接仿真服务器 → 创建全局摄像头 →
+    创建 SimCoordinator → 创建 3× SimArmController → 创建 SimVisualizer →
+    启动全部线程 → 等待退出 → 清理并打印统计 (含落盘任务数)。
 
 按键:
     q / ESC  退出程序
@@ -45,6 +47,7 @@ from simulation.global_camera import GlobalCamera
 from simulation.sim_3arm.sim_coordinator import SimCoordinator, load_sim_config
 from simulation.sim_3arm.sim_arm_controller import SimArmController
 from simulation.sim_3arm.sim_visualizer import SimVisualizer
+from simulation.sim_3arm.task_recorder import TaskRecorder
 
 
 def setup_logging(log_dir: str):
@@ -85,6 +88,8 @@ def parse_args():
   python run_sim_3arm.py --server http://192.168.1.121:8080
   python run_sim_3arm.py --sim-camera
   python run_sim_3arm.py --no-camera
+  python run_sim_3arm.py --task-log logs/tasks.jsonl
+  python run_sim_3arm.py --no-task-log
         """
     )
     parser.add_argument('--config', default=None,
@@ -99,6 +104,11 @@ def parse_args():
                         help='从仿真服务器获取每臂摄像头图像 (POST /get_camera)')
     parser.add_argument('--no-camera', action='store_true',
                         help='无相机模式 — 虚拟深度图，仅测试线程/通信链路')
+    parser.add_argument('--task-log', default=None,
+                        help='生产任务落盘路径 (.jsonl)，默认 <sim_3arm>/logs/'
+                             'tasks_<时间>.jsonl')
+    parser.add_argument('--no-task-log', action='store_true',
+                        help='禁用生产任务落盘')
     return parser.parse_args()
 
 
@@ -132,7 +142,23 @@ def main():
         sim_cfg.sim_timeout = args.timeout
 
     # ═══════════════════════════════════════════════════════════════════
-    # 2. 创建仿真客户端 + 检查连通性
+    # 2. 创建生产任务落盘记录器
+    # ═══════════════════════════════════════════════════════════════════
+    task_recorder = None
+    if args.no_task_log:
+        logger.info("已禁用生产任务落盘 (--no-task-log)")
+    else:
+        task_log_path = args.task_log
+        if not task_log_path:
+            task_log_path = os.path.join(
+                _sim_3arm_dir, 'logs',
+                f"tasks_{time.strftime('%Y%m%d_%H%M%S')}.jsonl",
+            )
+        task_recorder = TaskRecorder(task_log_path)
+        logger.info(f"生产任务将落盘到: {task_recorder.path}")
+
+    # ═══════════════════════════════════════════════════════════════════
+    # 3. 创建仿真客户端 + 检查连通性
     # ═══════════════════════════════════════════════════════════════════
     client = SimulationClient(
         base_url=sim_cfg.sim_server_url,
@@ -148,7 +174,7 @@ def main():
         )
 
     # ═══════════════════════════════════════════════════════════════════
-    # 3. 创建全局摄像头
+    # 4. 创建全局摄像头
     # ═══════════════════════════════════════════════════════════════════
     gc = sim_cfg.global_camera
     global_cam = GlobalCamera(
@@ -160,13 +186,14 @@ def main():
                 f"物块={len(gc.objects)}")
 
     # ═══════════════════════════════════════════════════════════════════
-    # 4. 创建 SimCoordinator
+    # 5. 创建 SimCoordinator
     # ═══════════════════════════════════════════════════════════════════
     logger.info("初始化 SimCoordinator...")
-    coordinator = SimCoordinator(sim_cfg, client=client)
+    coordinator = SimCoordinator(sim_cfg, client=client,
+                                 task_recorder=task_recorder)
 
     # ═══════════════════════════════════════════════════════════════════
-    # 5. 创建 3× SimArmController
+    # 6. 创建 3× SimArmController
     # ═══════════════════════════════════════════════════════════════════
     controllers = []
     for arm_cfg in sim_cfg.arms:
@@ -181,7 +208,7 @@ def main():
         controllers.append(ctrl)
 
     # ═══════════════════════════════════════════════════════════════════
-    # 6. 初始化 SimVisualizer
+    # 7. 初始化 SimVisualizer
     # ═══════════════════════════════════════════════════════════════════
     logger.info("初始化 SimVisualizer...")
     viz = SimVisualizer(sim_cfg.system_config, coordinator, global_cam)
@@ -189,7 +216,7 @@ def main():
         viz.attach_controller(ctrl)
 
     # ═══════════════════════════════════════════════════════════════════
-    # 7. 启动所有线程
+    # 8. 启动所有线程
     # ═══════════════════════════════════════════════════════════════════
     logger.info("启动所有子系统...")
     for ctrl in controllers:
@@ -202,7 +229,7 @@ def main():
     logger.info("=" * 60)
 
     # ═══════════════════════════════════════════════════════════════════
-    # 8. 等待退出信号
+    # 9. 等待退出信号
     # ═══════════════════════════════════════════════════════════════════
     def _signal_handler(signum, frame):
         logger.info(f"收到信号 {signum}，正在退出...")
@@ -220,7 +247,7 @@ def main():
         logger.info("收到 KeyboardInterrupt")
     finally:
         # ═══════════════════════════════════════════════════════════════
-        # 9. 清理
+        # 10. 清理
         # ═══════════════════════════════════════════════════════════════
         logger.info("正在关闭系统...")
         coordinator.broadcast_stop()
@@ -234,6 +261,14 @@ def main():
         viz.join(timeout=5.0)
 
         coordinator.close()
+
+        # 关闭任务落盘记录器
+        if task_recorder is not None:
+            task_recorder.close()
+            logger.info(
+                f"生产任务已落盘: {task_recorder.count} 条 "
+                f"→ {task_recorder.path}"
+            )
 
         # 打印最终统计
         counts = coordinator.get_grasp_counts()

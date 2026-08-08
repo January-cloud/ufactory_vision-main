@@ -31,6 +31,7 @@ for _p in (_simulation_dir, _demo_dir):
 from simulation.simulation_client import SimulationClient, SimulationClientError
 from multi_arm.config import SystemConfig, ArmConfig, load_config
 from multi_arm.coordinator import MultiArmCoordinator
+from simulation.sim_3arm.task_recorder import TaskRecorder
 
 
 logger = logging.getLogger(__name__)
@@ -151,14 +152,17 @@ class SimCoordinator:
       - 共享 SimulationClient (所有臂共用同一 HTTP 会话)
       - 任务发送串行化: 同一时刻仅一个臂在 POST /task
       - 全局抓取冷却: 相邻两次抓取任务间隔 >= global_cooldown_ms
+      - 生产任务落盘: send_task 后由 TaskRecorder 记录每次任务
     """
 
     def __init__(self, sim_cfg: SimSystemConfig,
-                 client: Optional[SimulationClient] = None):
+                 client: Optional[SimulationClient] = None,
+                 task_recorder: Optional[TaskRecorder] = None):
         """
         参数:
-            sim_cfg:  三臂仿真配置
-            client:   共享 SimulationClient，为 None 时自动创建
+            sim_cfg:        三臂仿真配置
+            client:         共享 SimulationClient，为 None 时自动创建
+            task_recorder:  生产任务落盘记录器，为 None 时不落盘
         """
         self._sim_cfg = sim_cfg
         self._sys_cfg = sim_cfg.system_config
@@ -171,6 +175,9 @@ class SimCoordinator:
                 retries=sim_cfg.sim_retries,
             )
         self._client = client
+
+        # 生产任务落盘记录器
+        self._task_recorder = task_recorder
 
         # 内部真机协调器
         self._coord = MultiArmCoordinator(self._sys_cfg)
@@ -210,13 +217,17 @@ class SimCoordinator:
     # ── 仿真专用: 任务发送 ──
 
     def send_task(self, arm_id: int, sequence: list,
-                  wait_cooldown: bool = True) -> bool:
-        """串行化 + 全局冷却地发送抓取任务序列到仿真服务器。
+                  wait_cooldown: bool = True,
+                  meta: Optional[dict] = None) -> bool:
+        """串行化 + 全局冷却地发送抓取任务序列到仿真服务器，并落盘记录。
 
         参数:
             arm_id:         发送任务的臂编号
             sequence:       任务序列 (由 TaskBuilder 构建)
             wait_cooldown:  是否等待全局冷却 (默认 True)
+            meta:           可选任务上下文 dict (如 object_type / goal /
+                            release_xyz)，会合并进落盘记录；未配置 TaskRecorder
+                            时该参数被忽略
 
         返回:
             True  发送成功
@@ -232,15 +243,32 @@ class SimCoordinator:
                     logger.debug("Arm-%d: 等待全局冷却 %.2fs", arm_id, wait)
                     time.sleep(wait)
 
+            success = False
             try:
                 resp = self._client.post_task(sequence, arm_id=arm_id)
                 self._last_global_grasp_time = time.monotonic()
                 logger.info("Arm-%d: 任务已发送 (%d 步) — 响应: %s",
                             arm_id, len(sequence), resp)
-                return True
+                success = True
             except SimulationClientError as e:
                 logger.error("Arm-%d: 发送任务失败: %s", arm_id, e)
-                return False
+                success = False
+
+            # 生产任务落盘 (成功/失败都记录，便于事后排查)
+            if self._task_recorder is not None:
+                arm_cfg = self._sys_cfg.get_arm(arm_id)
+                record = {
+                    "arm_id": arm_id,
+                    "arm_name": arm_cfg.name if arm_cfg else f"Arm-{arm_id}",
+                    "success": success,
+                    "steps": len(sequence),
+                }
+                if meta:
+                    record.update(meta)
+                record["sequence"] = sequence
+                self._task_recorder.record(record)
+
+            return success
 
     def check_connection(self) -> bool:
         """检查仿真服务器连通性。"""

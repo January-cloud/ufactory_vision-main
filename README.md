@@ -169,7 +169,8 @@ config_3arms.json → SystemConfig
 | `sim_coordinator.py` | **★ Simulation coordinator**. Thin wrapper around `MultiArmCoordinator`, adds shared `SimulationClient`, serialized task sending (per-arm lock + global cooldown), and `load_sim_config()` for simulation config files |
 | `sim_arm_controller.py` | **★ Per-arm simulation control thread**. Each arm runs its own: BuiltinCamera/SimCamera → GGCNN model → TaskBuilder. Single-stage grasp pipeline (observe → cluster → lock → POST /task), equivalent to real `ArmController` but via HTTP |
 | `sim_visualizer.py` | **★ Multi-arm + global camera display**. Independent render thread showing 2×2 layout: Arm-0 / Arm-1 / Arm-2 / global camera + status panel. Supports the same q=Quit / r=ClearHazard / s=Summary keybindings |
-| `run_sim_3arm.py` | **★ 3-arm simulation main entry**. Load config → connect to simulation server → create global camera → create SimCoordinator → create 3 × SimArmController → start visualizer → wait for exit |
+| `task_recorder.py` | **★ Production task recorder (new)**. Thread-safe JSON Lines writer that persists every sent task (recognized object, grasp target, release pose, 10-step action sequence, send result) to disk; flushes after each record so no data is lost on crash |
+| `run_sim_3arm.py` | **★ 3-arm simulation main entry**. Load config → create task recorder → connect to simulation server → create global camera → create SimCoordinator → create 3 × SimArmController → start visualizer → wait for exit |
 
 ---
 
@@ -302,12 +303,14 @@ Step 6  Press q/ESC to exit
 
 ```
 Step 1  Load Config
-        └─ load_sim_config("config_sim_3arms.json") → SimSystemConfig
+        ├─ load_sim_config("config_sim_3arms.json") → SimSystemConfig
+        └─ Create TaskRecorder for production-task logging (default logs/tasks_<time>.jsonl)
 
 Step 2  Initialize Simulation Infrastructure
         ├─ SimulationClient (shared HTTP session across all arms)
         ├─ GlobalCamera (bird's-eye view covering all 3 workspaces)
         └─ SimCoordinator (wraps MultiArmCoordinator for zone/safety management)
+           └─ Attach TaskRecorder → task persistence capability
 
 Step 3  Create 3 SimArmControllers (each in independent thread)
         ├─ Thread-0 (Arm-Left):  BuiltinCamera → GGCNN2 → TaskBuilder → main_loop
@@ -320,7 +323,9 @@ Step 3  Create 3 SimArmControllers (each in independent thread)
         │   ├─ Exclusive zone → build task sequence directly
         │   └─ Coordination zone → request_zone() via coordinator → build after lock acquired
         ├─ Build 10-step pick-and-place sequence via TaskBuilder.build_pick_and_place()
-        ├─ POST /task via coordinator.send_task(arm_id, sequence) — serialized with global cooldown
+        ├─ POST /task via coordinator.send_task(arm_id, sequence, meta) — serialized with global cooldown
+        │   └─ TaskRecorder persists every send as JSON Lines (object type / grasp target /
+        │      release pose / 10-step sequence / result — both success and failure)
         ├─ Release coordination zone → loop
         └─ Every frame: update Coordinator state + virtual end-effector pose
 
@@ -341,7 +346,8 @@ Step 5  Safety Monitor (Coordinator background, continuous 10Hz)
         └─ Zone lease expiry check (30s unrenewed → auto-reclaim)
 
 Step 6  Press q/ESC to exit
-        └─ broadcast_stop() → controllers stop → visualizer stops → print stats
+        └─ broadcast_stop() → controllers stop → visualizer stops
+           → close TaskRecorder and print persisted-task count → print grasp stats
 ```
 
 ### 4.5 Data Flow Across All Stages
@@ -410,6 +416,12 @@ python run_sim_3arm.py --sim-camera
 
 # No-camera mode (virtual depth, test thread/communication links only)
 python run_sim_3arm.py --no-camera
+
+# Custom production-task log path (default: logs/tasks_<time>.jsonl)
+python run_sim_3arm.py --task-log logs/tasks.jsonl
+
+# Disable production-task logging
+python run_sim_3arm.py --no-task-log
 ```
 
 ### Single-Arm Real Grasping
@@ -474,6 +486,7 @@ python run_3arm_grasp.py
 - **Collision Detection**: Ensure collision detection is enabled before running. Recommended sensitivity: 3 or higher.
 - **Simulation Mode** uses local synthetic camera by default. Use `--sim-camera` to fetch images from a simulation server.
 - **3-Arm Simulation** (`sim_3arm/`) mirrors the real `multi_arm/` structure: each arm has its own camera + GGCNN model + a shared global overhead camera. Supports the same 3 camera modes as single-arm simulation (`--sim-camera` / `--no-camera` / default local synthetic).
+- **Production-task logging** (`sim_3arm/`): every task sent during a run is persisted by default as JSON Lines into `sim_3arm/logs/tasks_<time>.jsonl` (recognized object type, grasp target, release pose, 10-step action sequence, send result — success and failure are both recorded). Override the path with `--task-log`, or disable with `--no-task-log`. The file can be reused for yield / quality statistics after each run.
 
 ---
 

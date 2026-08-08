@@ -385,7 +385,16 @@ class SimArmController:
                     sequence = self._builder.build_pick_and_place(
                         list(goal), release_xyz=release_xyz
                     )
-                    success = self._coord.send_task(arm_id, sequence)
+                    # 附带任务上下文供落盘记录 (object_type / goal / release_xyz)
+                    success = self._coord.send_task(
+                        arm_id, sequence,
+                        meta={
+                            "object_type": object_type or "",
+                            "goal": [round(v, 2) for v in goal],
+                            "release_xyz": (list(release_xyz)
+                                            if release_xyz else None),
+                        },
+                    )
 
                     if success:
                         self._grasp_count += 1

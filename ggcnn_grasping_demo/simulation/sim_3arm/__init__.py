@@ -23,6 +23,7 @@ import sys
 from simulation.sim_3arm.sim_arm_controller import SimArmController
 from simulation.sim_3arm.sim_coordinator import SimSystemConfig, SimCoordinator, load_sim_config
 from simulation.sim_3arm.sim_visualizer import SimVisualizer
+from simulation.sim_3arm.task_recorder import TaskRecorder
 
 # 将 simulation/ 目录和 ggcnn_grasping_demo/ 目录加入 sys.path，
 # 保证直接运行 sim_3arm/ 下脚本时能 import 到：
@@ -41,4 +42,5 @@ __all__ = [
     'SimCoordinator',
     'SimArmController',
     'SimVisualizer',
+    'TaskRecorder',
 ]
