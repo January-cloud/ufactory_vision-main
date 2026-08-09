@@ -43,6 +43,7 @@ from simulation.task_builder import TaskBuilder, SimGraspConfig
 from simulation.builtin_camera import BuiltinCamera
 from simulation.sim_camera import SimCamera
 from simulation.simulation_client import SimulationClient
+from simulation.external_input import ExternalInputServer
 
 from multi_arm.config import ArmConfig, ArmState
 from multi_arm.dominant_cluster import dominant_cluster
@@ -79,7 +80,8 @@ class SimArmController:
                  coordinator: SimCoordinator,
                  use_sim_camera: bool = False,
                  no_camera: bool = False,
-                 model_file: Optional[str] = None):
+                 model_file: Optional[str] = None,
+                 use_ext_input: bool = False):
         """
         参数:
             sim_cfg:         三臂仿真配置
@@ -90,6 +92,9 @@ class SimArmController:
             no_camera:       True 无相机模式 — 使用虚拟深度图，仅测试线程/
                              通信链路，不加载 GGCNN，不产生抓取
             model_file:      GGCNN 权重路径覆盖 (None 用 arm_cfg.model_file)
+            use_ext_input:   True 外部坐标输入模式 — 跳过相机/GGCNN，从
+                             coordinator 的 ExternalInputServer 轮询外部坐标
+                             (POST /grasp_target，按 arm_id 路由)
         """
         self._sim_cfg = sim_cfg
         self._cfg = arm_cfg
@@ -97,6 +102,7 @@ class SimArmController:
         self._client: SimulationClient = coordinator.client
         self._use_sim_camera = use_sim_camera
         self._no_camera = no_camera
+        self._use_ext_input = use_ext_input
 
         self._camera = None
         self._ggcnn = None
@@ -104,6 +110,11 @@ class SimArmController:
         self._builder: Optional[TaskBuilder] = None
         self._object_mapper: ObjectMapper = ObjectMapper()
         self._current_object_type: str = ""
+
+        # 外部坐标输入服务器 (三臂共享，按 arm_id 路由)
+        self._ext_server: Optional[ExternalInputServer] = (
+            coordinator.ext_input_server if use_ext_input else None
+        )
 
         # 线程控制
         self._stop_event: Optional[threading.Event] = None
@@ -188,8 +199,38 @@ class SimArmController:
     # ═══════════════════════════════════════════════════════════════════
 
     def _init(self):
-        """初始化相机、GGCNN 模型、TaskBuilder。"""
+        """初始化相机、GGCNN 模型、TaskBuilder。
+
+        外部坐标输入模式 (use_ext_input) 下跳过相机与 GGCNN，
+        仅构建 TaskBuilder + ObjectMapper，从 ExternalInputServer 轮询坐标。
+        """
         arm_id = self._cfg.arm_id
+
+        # ① 外部坐标输入模式：跳过相机与 GGCNN
+        if self._use_ext_input:
+            if self._ext_server is None:
+                raise ValueError(
+                    f"Arm-{arm_id}: 启用外部输入模式但 coordinator 未提供 "
+                    f"ExternalInputServer — 请检查 run_sim_3arm.py --ext-input"
+                )
+            logger.info(f"Arm-{arm_id}: 外部坐标输入模式 — 跳过相机/GGCNN")
+            self._camera = None
+            self._ggcnn = None
+
+            # ③ 构建 TaskBuilder (使用该臂的观察位/释放位)
+            self._builder = TaskBuilder(SimGraspConfig(
+                detect_xyz=list(self._cfg.detect_xyz),
+                release_xyz=list(self._cfg.release_xyz),
+                above_z=self._cfg.above_z,
+                grasping_min_z=self._cfg.grasping_min_z,
+            ))
+
+            # ④ 构建物体识别 → 任务切换映射
+            self._object_mapper = self._build_object_mapper()
+            logger.info(f"Arm-{arm_id}: 初始化完成 (外部输入模式 "
+                        f"server={self._ext_server.url} "
+                        f"任务规则={len(self._object_mapper.rules)})")
+            return
 
         # ① 无相机模式：跳过摄像头与 GGCNN，仅测试线程链路
         if self._no_camera:
@@ -294,56 +335,118 @@ class SimArmController:
                           eef[3], eef[4], eef[5]]
                 self._coord.update_arm_position(arm_id, tuple(eef_mm))
 
-                # ── 获取 RGB-D + GGCNN 推理 ──
-                if self._no_camera:
-                    # 无相机模式：虚拟深度图 (无物块)，仅测试线程链路
-                    color_image = np.zeros((cfg.cam_height, cfg.cam_width, 3),
-                                           dtype=np.uint8)
-                    depth_image = np.ones((cfg.cam_height, cfg.cam_width),
-                                          dtype=np.float32) * 0.5
-                    grasp_img = np.zeros((cs, cs, 3), dtype=np.uint8)
-                    result = None
-                else:
-                    color_image, depth_image = self._camera.get_images(
-                        align=True
-                    )
-                    depth_image = depth_image.astype(np.float32)
-                    grasp_img, result = self._ggcnn.get_grasp_img(
-                        depth_image, self._K, eef[2]
-                    )
-
-                color_crop = color_image[off_r:off_r+cs, off_c:off_c+cs].copy()
-
-                # ── 候选缓冲 + 聚类分析 ──
+                # ── 感知：外部坐标输入 或 摄像头 GGCNN 二选一 ──
                 goal = None
                 stable = False
+                ext_label = ""   # 外部输入携带的 label (object_type 提示)
 
-                if result is not None and result[2] > cfg.min_result_z_mm / 1000.0:
-                    cand = self._cam_result_to_base(result)
-                    self._cand_buf.append(cand)
-
-                    if len(self._cand_buf) > cfg.cand_window:
-                        self._cand_buf.pop(0)
-
-                    if len(self._cand_buf) >= cfg.cand_window:
-                        pick, cnt = dominant_cluster(
-                            self._cand_buf, cfg.cand_bin_mm
+                if self._use_ext_input:
+                    # 外部坐标输入模式：轮询共享服务器，按 arm_id 取目标
+                    target, label = None, None
+                    result = self._ext_server.get_target_for(arm_id)
+                    if result is not None:
+                        target, label = result
+                    if target is not None:
+                        valid, corrected, reason = self._validate_external_target(
+                            target
                         )
-                        if cnt >= cfg.cand_min_frames:
-                            stable = True
-                            goal = pick
+                        if not valid:
+                            logger.warning(
+                                f"Arm-{arm_id}: 外部坐标校验失败 — {reason} "
+                                f"— 已丢弃: {target}"
+                            )
                         else:
-                            goal = cand
-                    else:
-                        goal = cand
+                            if corrected != target:
+                                logger.info(
+                                    f"Arm-{arm_id}: 外部坐标已修正: {reason} → "
+                                    f"X={corrected[0]:.1f} Y={corrected[1]:.1f}"
+                                )
+                            goal = corrected
+                            stable = True
+                            ext_label = label or ""
+                            self._cand_buf.clear()
 
-                    mp = self._ggcnn.prev_mp
-                    cv2.circle(
-                        color_crop, (int(mp[1]), int(mp[0])), 6,
-                        (0, 255, 0) if stable else (0, 200, 255), -1
+                    # 外部输入模式的占位画面 (无相机/GGCNN)
+                    color_image = np.zeros(
+                        (cfg.cam_height, cfg.cam_width, 3), dtype=np.uint8
+                    )
+                    color_crop = color_image[off_r:off_r+cs, off_c:off_c+cs].copy()
+                    cv2.putText(
+                        color_crop, "MANUAL MODE", (10, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2
+                    )
+                    if stable:
+                        cv2.putText(
+                            color_crop,
+                            f"X={goal[0]:.0f} Y={goal[1]:.0f} "
+                            f"Yaw={goal[5]:.0f} {ext_label or ''}",
+                            (10, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (255, 255, 255), 1
+                        )
+                    else:
+                        cv2.putText(
+                            color_crop, "WAITING FOR INPUT", (10, 75),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4,
+                            (0, 200, 255), 1
+                        )
+                    # heatmap 占位 (无 GGCNN)
+                    grasp_img = np.zeros((cs, cs, 3), dtype=np.uint8)
+                    cv2.putText(
+                        grasp_img, "EXT INPUT", (cs // 5, cs // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2
                     )
                 else:
-                    self._cand_buf.clear()
+                    # ── 摄像头模式：RGB-D + GGCNN 推理 ──
+                    if self._no_camera:
+                        # 无相机模式：虚拟深度图 (无物块)，仅测试线程链路
+                        color_image = np.zeros(
+                            (cfg.cam_height, cfg.cam_width, 3), dtype=np.uint8
+                        )
+                        depth_image = np.ones(
+                            (cfg.cam_height, cfg.cam_width),
+                            dtype=np.float32
+                        ) * 0.5
+                        grasp_img = np.zeros((cs, cs, 3), dtype=np.uint8)
+                        result = None
+                    else:
+                        color_image, depth_image = self._camera.get_images(
+                            align=True
+                        )
+                        depth_image = depth_image.astype(np.float32)
+                        grasp_img, result = self._ggcnn.get_grasp_img(
+                            depth_image, self._K, eef[2]
+                        )
+
+                    color_crop = color_image[off_r:off_r+cs, off_c:off_c+cs].copy()
+
+                    # ── 候选缓冲 + 聚类分析 ──
+                    if (result is not None
+                            and result[2] > cfg.min_result_z_mm / 1000.0):
+                        cand = self._cam_result_to_base(result)
+                        self._cand_buf.append(cand)
+
+                        if len(self._cand_buf) > cfg.cand_window:
+                            self._cand_buf.pop(0)
+
+                        if len(self._cand_buf) >= cfg.cand_window:
+                            pick, cnt = dominant_cluster(
+                                self._cand_buf, cfg.cand_bin_mm
+                            )
+                            if cnt >= cfg.cand_min_frames:
+                                stable = True
+                                goal = pick
+                            else:
+                                goal = cand
+                        else:
+                            goal = cand
+
+                        mp = self._ggcnn.prev_mp
+                        cv2.circle(
+                            color_crop, (int(mp[1]), int(mp[0])), 6,
+                            (0, 255, 0) if stable else (0, 200, 255), -1
+                        )
+                    else:
+                        self._cand_buf.clear()
 
                 # ── 更新 Coordinator 状态 ──
                 if stable:
@@ -380,7 +483,7 @@ class SimArmController:
                     # 构建并发送任务序列
                     self._coord.update_arm_state(arm_id, ArmState.GRASPING)
                     object_type, release_xyz = self._recognize_and_select_task(
-                        goal
+                        goal, label=ext_label or None
                     )
                     sequence = self._builder.build_pick_and_place(
                         list(goal), release_xyz=release_xyz
@@ -418,9 +521,12 @@ class SimArmController:
                     self._coord.update_arm_state(arm_id, ArmState.IDLE)
 
                 # ── 状态栏渲染 ──
-                state_label = ("LOCKED" if stable
-                               else ("SEARCHING" if goal is not None
-                                     else "NO OBJECT"))
+                if self._use_ext_input:
+                    state_label = "LOCKED" if stable else "WAITING INPUT"
+                else:
+                    state_label = ("LOCKED" if stable
+                                   else ("SEARCHING" if goal is not None
+                                         else "NO OBJECT"))
                 cv2.putText(
                     color_crop,
                     f"{cfg.name} | {state_label} | "
@@ -538,12 +644,15 @@ class SimArmController:
             self._current_object_type = object_type
 
     def _recognize_and_select_task(
-            self, goal: List[float]) -> Tuple[Optional[str],
-                                              Optional[List[float]]]:
+            self, goal: List[float],
+            label: Optional[str] = None) -> Tuple[Optional[str],
+                                                  Optional[List[float]]]:
         """识别抓取目标对应的物体类型，并选择对应的释放位置。
 
         参数:
-            goal: 基坐标系抓取目标 [X, Y, Z, Roll, Pitch, Yaw]
+            goal:  基坐标系抓取目标 [X, Y, Z, Roll, Pitch, Yaw]
+            label: 外部输入携带的物体类型提示 (object_type)，可为 None；
+                   非 None 时优先按类型查表，未命中回退坐标最近邻
 
         返回:
             (object_type, release_xyz) — 未识别到返回 (None, None)，
@@ -552,7 +661,16 @@ class SimArmController:
         未来接入视觉识别: 只需替换 ObjectMapper.recognize 的实现，
         此方法无需改动。
         """
-        rule = self._object_mapper.recognize(goal[0], goal[1])
+        rule = None
+        if label:
+            rule = self._object_mapper.recognize_by_type(label)
+            if rule is None:
+                logger.warning(
+                    f"Arm-{self._cfg.arm_id}: label '{label}' 未匹配任务规则，"
+                    f"回退坐标最近邻"
+                )
+        if rule is None:
+            rule = self._object_mapper.recognize(goal[0], goal[1])
         if rule is None:
             self._current_object_type = ""
             return None, None
@@ -564,6 +682,62 @@ class SimArmController:
             f"释放 {rule.release_xyz or self._cfg.release_xyz}"
         )
         return rule.object_type, rule.release_xyz
+
+    def _validate_external_target(
+            self, target: List[float]) -> Tuple[bool, List[float], str]:
+        """校验外部输入的基坐标系抓取目标 [X, Y, Z, Roll, Pitch, Yaw] (mm/度)。
+
+        与 run_simulation.py 的 validate_grasp_target 对齐，但工作区/Z 限位
+        使用该臂自身配置 (workspace_zone/coordination_zones/above_z/
+        grasping_min_z)。
+
+        返回:
+            (is_valid, corrected_target, reason)
+        """
+        cfg = self._cfg
+
+        if target is None or len(target) < 3:
+            return False, target, "目标为空或缺少 X/Y/Z"
+
+        try:
+            x, y, z = float(target[0]), float(target[1]), float(target[2])
+            roll = float(target[3]) if len(target) > 3 else 180.0
+            pitch = float(target[4]) if len(target) > 4 else 0.0
+            yaw = float(target[5]) if len(target) > 5 else 0.0
+        except (TypeError, ValueError) as e:
+            return False, target, f"坐标值无法转换为数字: {e}"
+
+        for name, val in [('X', x), ('Y', y), ('Z', z),
+                          ('Roll', roll), ('Pitch', pitch), ('Yaw', yaw)]:
+            if math.isnan(val) or math.isinf(val):
+                return False, target, f"{name} 为 NaN/无穷大"
+
+        # XY 工作区 (独占区或协调区) — 与触发抓取的 _in_own_zone 一致
+        if not self._in_own_zone([x, y, 0, 0, 0, 0]):
+            return False, target, "XY 超出工作区 (独占区/协调区)"
+
+        # Z 高度检查
+        z_max = cfg.above_z + 100
+        if z < cfg.grasping_min_z:
+            return False, target, f"Z 低于最低限位 {cfg.grasping_min_z} mm"
+        if z > z_max:
+            return False, target, f"Z 高于最大允许高度 {z_max} mm"
+
+        # 姿态校验与归一化 (Roll≈180° 朝下, Pitch≈0°, Yaw 钳位到 [-90,90])
+        if not (170.0 <= roll <= 190.0):
+            roll = 180.0
+        if not (-15.0 <= pitch <= 15.0):
+            pitch = 0.0
+        yaw = yaw % 360.0
+        if yaw > 180.0:
+            yaw -= 360.0
+        elif yaw < -180.0:
+            yaw += 360.0
+        if abs(yaw) > 90.0:
+            yaw = max(-90.0, min(90.0, yaw))
+
+        corrected = [x, y, z, roll, pitch, yaw]
+        return True, corrected, "OK"
 
     def _cleanup(self):
         """清理资源：停相机、更新状态。"""

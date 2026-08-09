@@ -14,6 +14,8 @@ run_sim_3arm — 三臂协同仿真启动器
     python run_sim_3arm.py --config config_sim_3arms.json
     python run_sim_3arm.py --task-log my_tasks.jsonl   # 自定义任务落盘路径
     python run_sim_3arm.py --no-task-log               # 禁用生产任务落盘
+    python run_sim_3arm.py --ext-input                 # 外部坐标输入模式
+    python run_sim_3arm.py --ext-input --ext-port 9090 # 自定义外部输入端口
 
 流程:
     加载配置 → 创建任务落盘记录器 → 连接仿真服务器 → 创建全局摄像头 →
@@ -43,6 +45,7 @@ for _p in (_sim_3arm_dir, _simulation_dir, _demo_dir):
 
 from simulation.simulation_client import SimulationClient
 from simulation.global_camera import GlobalCamera
+from simulation.external_input import ExternalInputServer
 
 from simulation.sim_3arm.sim_coordinator import SimCoordinator, load_sim_config
 from simulation.sim_3arm.sim_arm_controller import SimArmController
@@ -90,6 +93,8 @@ def parse_args():
   python run_sim_3arm.py --no-camera
   python run_sim_3arm.py --task-log logs/tasks.jsonl
   python run_sim_3arm.py --no-task-log
+  python run_sim_3arm.py --ext-input              外部坐标输入模式
+  python run_sim_3arm.py --ext-input --ext-port 9090
         """
     )
     parser.add_argument('--config', default=None,
@@ -109,6 +114,13 @@ def parse_args():
                              'tasks_<时间>.jsonl')
     parser.add_argument('--no-task-log', action='store_true',
                         help='禁用生产任务落盘')
+    parser.add_argument('--ext-input', action='store_true',
+                        help='外部坐标输入模式 — 所有臂共用一台 HTTP 服务器，'
+                             'POST /grasp_target 携带 arm_id 路由 (跳过 GGCNN)')
+    parser.add_argument('--ext-port', type=int, default=8090,
+                        help='外部坐标输入 HTTP 服务器端口 (默认: 8090)')
+    parser.add_argument('--ext-host', type=str, default='0.0.0.0',
+                        help='外部坐标输入 HTTP 服务器绑定地址 (默认: 0.0.0.0)')
     return parser.parse_args()
 
 
@@ -186,11 +198,39 @@ def main():
                 f"物块={len(gc.objects)}")
 
     # ═══════════════════════════════════════════════════════════════════
+    # 4.5 外部坐标输入服务器 (可选)
+    # ═══════════════════════════════════════════════════════════════════
+    input_server = None
+    if args.ext_input:
+        logger.info(f"外部坐标输入模式: 启动 HTTP 服务器 "
+                    f"{args.ext_host}:{args.ext_port} ...")
+        input_server = ExternalInputServer(
+            host=args.ext_host, port=args.ext_port
+        )
+        try:
+            input_server.start()
+            logger.info(
+                "外部坐标输入服务已启动: %s "
+                "(POST /grasp_target 携带 arm_id 路由, GET /status)",
+                input_server.url
+            )
+        except OSError as e:
+            logger.error(
+                "无法启动外部坐标服务器: %s (端口 %d 可能被占用)",
+                e, args.ext_port
+            )
+            client.close()
+            sys.exit(1)
+    else:
+        logger.info("未启用外部坐标输入 (如需使用加 --ext-input)")
+
+    # ═══════════════════════════════════════════════════════════════════
     # 5. 创建 SimCoordinator
     # ═══════════════════════════════════════════════════════════════════
     logger.info("初始化 SimCoordinator...")
     coordinator = SimCoordinator(sim_cfg, client=client,
-                                 task_recorder=task_recorder)
+                                 task_recorder=task_recorder,
+                                 ext_input_server=input_server)
 
     # ═══════════════════════════════════════════════════════════════════
     # 6. 创建 3× SimArmController
@@ -204,6 +244,7 @@ def main():
             use_sim_camera=args.sim_camera,
             no_camera=args.no_camera,
             model_file=args.model,
+            use_ext_input=args.ext_input,
         )
         controllers.append(ctrl)
 
@@ -269,6 +310,11 @@ def main():
                 f"生产任务已落盘: {task_recorder.count} 条 "
                 f"→ {task_recorder.path}"
             )
+
+        # 关闭外部坐标输入服务器
+        if input_server is not None:
+            input_server.stop()
+            logger.info("外部坐标输入服务器已关闭")
 
         # 打印最终统计
         counts = coordinator.get_grasp_counts()

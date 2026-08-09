@@ -29,6 +29,7 @@ for _p in (_simulation_dir, _demo_dir):
         sys.path.insert(0, _p)
 
 from simulation.simulation_client import SimulationClient, SimulationClientError
+from simulation.external_input import ExternalInputServer
 from multi_arm.config import SystemConfig, ArmConfig, load_config
 from multi_arm.coordinator import MultiArmCoordinator
 from simulation.sim_3arm.task_recorder import TaskRecorder
@@ -157,12 +158,15 @@ class SimCoordinator:
 
     def __init__(self, sim_cfg: SimSystemConfig,
                  client: Optional[SimulationClient] = None,
-                 task_recorder: Optional[TaskRecorder] = None):
+                 task_recorder: Optional[TaskRecorder] = None,
+                 ext_input_server: Optional[ExternalInputServer] = None):
         """
         参数:
-            sim_cfg:        三臂仿真配置
-            client:         共享 SimulationClient，为 None 时自动创建
-            task_recorder:  生产任务落盘记录器，为 None 时不落盘
+            sim_cfg:           三臂仿真配置
+            client:            共享 SimulationClient，为 None 时自动创建
+            task_recorder:     生产任务落盘记录器，为 None 时不落盘
+            ext_input_server:  共享外部坐标输入服务器 (ExternalInputServer)，
+                               为 None 表示未启用外部输入模式
         """
         self._sim_cfg = sim_cfg
         self._sys_cfg = sim_cfg.system_config
@@ -178,6 +182,9 @@ class SimCoordinator:
 
         # 生产任务落盘记录器
         self._task_recorder = task_recorder
+
+        # 外部坐标输入服务器 (三臂模式共享一台，按 arm_id 路由)
+        self._ext_input_server = ext_input_server
 
         # 内部真机协调器
         self._coord = MultiArmCoordinator(self._sys_cfg)
@@ -199,6 +206,11 @@ class SimCoordinator:
     @property
     def sim_config(self) -> SimSystemConfig:
         return self._sim_cfg
+
+    @property
+    def ext_input_server(self) -> Optional[ExternalInputServer]:
+        """共享外部坐标输入服务器；未启用外部输入模式时为 None。"""
+        return self._ext_input_server
 
     # ── 委托给内部 MultiArmCoordinator ──
 

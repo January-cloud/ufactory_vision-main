@@ -158,7 +158,7 @@ config_3arms.json → SystemConfig
 | `sim_camera.py` | Simulation camera adapter. HTTP→base64 decode→numpy ndarray, fully compatible with RealSenseCamera interface |
 | `builtin_camera.py` | **★ Local synthetic camera**. Pure Python synthetic RGB-D images (table + objects + noise), zero hardware dependency, zero server dependency, default camera |
 | `global_camera.py` | **★ Global overhead camera (new)**. BuiltinCamera variant covering the full 3-arm workspace (left / center / right zones) with bird's-eye view for scene overview |
-| `external_input.py` | **★ External coordinate input server**. Background HTTP server receiving grasp coordinates (POST /grasp_target), passes to main loop via thread-safe queue |
+| `external_input.py` | **★ External coordinate input server**. Background HTTP server receiving grasp coordinates (POST /grasp_target). Optional `arm_id` field routes to per-arm sub-queues: single-arm mode consumes via `get_target()`, 3-arm mode via `get_target_for(arm_id)` |
 | `run_simulation.py` | **★ Single-arm simulation main entry**. Supports 3 camera modes + external coordinate dual-input pipeline + GGCNN inference |
 | `config_sim_3arms.json` | **★ 3-arm simulation config (new)**. Extends `config_3arms.json` with simulation-specific fields: `sim_server_url`, per-arm `sim_camera_objects`, `global_camera` parameters |
 
@@ -167,10 +167,10 @@ config_3arms.json → SystemConfig
 | File | Responsibility |
 |------|---------------|
 | `sim_coordinator.py` | **★ Simulation coordinator**. Thin wrapper around `MultiArmCoordinator`, adds shared `SimulationClient`, serialized task sending (per-arm lock + global cooldown), and `load_sim_config()` for simulation config files |
-| `sim_arm_controller.py` | **★ Per-arm simulation control thread**. Each arm runs its own: BuiltinCamera/SimCamera → GGCNN model → TaskBuilder. Single-stage grasp pipeline (observe → cluster → lock → POST /task), equivalent to real `ArmController` but via HTTP |
+| `sim_arm_controller.py` | **★ Per-arm simulation control thread**. Each arm runs its own: BuiltinCamera/SimCamera → GGCNN model → TaskBuilder. Single-stage grasp pipeline (observe → cluster → lock → POST /task), equivalent to real `ArmController` but via HTTP. Optional external-input mode (`use_ext_input`) polls the shared server by `arm_id` and bypasses camera/GGCNN |
 | `sim_visualizer.py` | **★ Multi-arm + global camera display**. Independent render thread showing 2×2 layout: Arm-0 / Arm-1 / Arm-2 / global camera + status panel. Supports the same q=Quit / r=ClearHazard / s=Summary keybindings |
 | `task_recorder.py` | **★ Production task recorder (new)**. Thread-safe JSON Lines writer that persists every sent task (recognized object, grasp target, release pose, 10-step action sequence, send result) to disk; flushes after each record so no data is lost on crash |
-| `run_sim_3arm.py` | **★ 3-arm simulation main entry**. Load config → create task recorder → connect to simulation server → create global camera → create SimCoordinator → create 3 × SimArmController → start visualizer → wait for exit |
+| `run_sim_3arm.py` | **★ 3-arm simulation main entry**. Load config → create task recorder → [optional] start external-input HTTP server (`--ext-input`) → connect to simulation server → create global camera → create SimCoordinator → create 3 × SimArmController → start visualizer → wait for exit |
 
 ---
 
@@ -317,8 +317,11 @@ Step 3  Create 3 SimArmControllers (each in independent thread)
         ├─ Thread-1 (Arm-Center): BuiltinCamera → GGCNN2 → TaskBuilder → main_loop
         └─ Thread-2 (Arm-Right):  BuiltinCamera → GGCNN2 → TaskBuilder → main_loop
 
-        Each main_loop internally:
-        ├─ Get RGB-D from per-arm camera → GGCNN2 inference → cluster → LOCKED
+        Each main_loop internally (two perception modes, chosen by --ext-input):
+        ├─ [Camera mode] Get RGB-D from per-arm camera → GGCNN2 inference → cluster → LOCKED
+        ├─ [Ext-input mode] Poll shared external server for this arm_id (POST /grasp_target)
+        │      └─ If target present → validate (own workspace / Z limits)
+        │         → goal = target, LOCKED, object type via label or nearest-neighbor
         ├─ Check if target is in exclusive or coordination zone
         │   ├─ Exclusive zone → build task sequence directly
         │   └─ Coordination zone → request_zone() via coordinator → build after lock acquired
@@ -377,8 +380,10 @@ Base-Frame Target [X, Y, Z(mm), Roll=180°, Pitch=0°, Yaw°]
     │                          └─ POST /task {"arm_id": N, "sequence": [...]}
     │                       └─ GlobalCamera for overall scene visualization
     │
-    └─ External Input → POST /grasp_target → direct base-frame target
+    └─ External Input → POST /grasp_target (optional arm_id) → direct base-frame target
                         Bypass GGCNN, share downstream execution pipeline
+                        ├─ Single-arm: run_simulation.py --ext-input
+                        └─ 3-arm: run_sim_3arm.py --ext-input (arm_id routes to arm)
 ```
 
 ---
@@ -422,6 +427,12 @@ python run_sim_3arm.py --task-log logs/tasks.jsonl
 
 # Disable production-task logging
 python run_sim_3arm.py --no-task-log
+
+# External coordinate input mode (all arms share one HTTP server, POST /grasp_target with arm_id)
+python run_sim_3arm.py --ext-input
+
+# Custom port for the external input server
+python run_sim_3arm.py --ext-input --ext-port 9090
 ```
 
 ### Single-Arm Real Grasping
@@ -487,6 +498,7 @@ python run_3arm_grasp.py
 - **Simulation Mode** uses local synthetic camera by default. Use `--sim-camera` to fetch images from a simulation server.
 - **3-Arm Simulation** (`sim_3arm/`) mirrors the real `multi_arm/` structure: each arm has its own camera + GGCNN model + a shared global overhead camera. Supports the same 3 camera modes as single-arm simulation (`--sim-camera` / `--no-camera` / default local synthetic).
 - **Production-task logging** (`sim_3arm/`): every task sent during a run is persisted by default as JSON Lines into `sim_3arm/logs/tasks_<time>.jsonl` (recognized object type, grasp target, release pose, 10-step action sequence, send result — success and failure are both recorded). Override the path with `--task-log`, or disable with `--no-task-log`. The file can be reused for yield / quality statistics after each run.
+- **External coordinate input** (`sim_3arm/`): enable with `--ext-input` to start one shared HTTP server (default `0.0.0.0:8090`). External systems `POST /grasp_target` with base-frame `x,y,z` (mm) plus optional `roll/pitch/yaw`, `label` (object type, e.g. `"part_a"`), and `arm_id` (0/1/2) to route the target to a specific arm. The target is validated against that arm's own workspace / Z limits, then the object type is recognized via `label` (falling back to coordinate nearest-neighbor matching) and the matching release position is used.
 
 ---
 

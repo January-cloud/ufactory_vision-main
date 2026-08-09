@@ -59,6 +59,10 @@ STATE_COLORS = {
     "SEARCHING":   (255, 200, 100),
     "WAIT_ZONE":   (100, 200, 255),
     "FINE_LOC":    (200, 255, 200),
+    # 外部坐标输入模式状态
+    "WAITING INPUT": (255, 200, 100),
+    "MANUAL":        (0, 200, 255),
+    "MANUAL MODE":   (0, 200, 255),
 }
 
 

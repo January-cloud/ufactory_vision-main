@@ -154,7 +154,7 @@ config_3arms.json → SystemConfig
 | `sim_camera.py` | 仿真摄像头适配器。HTTP 获取图像→base64 解码→numpy ndarray，接口与 RealSenseCamera 完全兼容 |
 | `builtin_camera.py` | **★ 本地合成摄像头**。纯 Python 生成模拟 RGB-D 图像（桌面+物体+噪声），零硬件依赖、零服务器依赖，默认摄像头 |
 | `global_camera.py` | **★ 全局俯瞰摄像头（新）**。BuiltinCamera 子类，视野覆盖全部三臂工作区（左/中/右三个区域），提供鸟瞰场景总览 |
-| `external_input.py` | **★ 外部坐标输入服务器**。后台 HTTP 服务器接收外部抓取坐标（POST /grasp_target），通过线程安全队列传递给主循环 |
+| `external_input.py` | **★ 外部坐标输入服务器**。后台 HTTP 服务器接收外部抓取坐标（POST /grasp_target），可选 `arm_id` 字段路由到各臂独立子队列：单臂模式用 `get_target()` 消费，三臂模式用 `get_target_for(arm_id)` 消费 |
 | `run_simulation.py` | **★ 单臂仿真主入口**。支持三种摄像头模式 + 外部坐标双输入管道 + GGCNN 推理管线 |
 | `config_sim_3arms.json` | **★ 三臂仿真配置（新）**。在 `config_3arms.json` 基础上增加仿真专用字段：`sim_server_url`、每臂 `sim_camera_objects`、`global_camera` 参数 |
 
@@ -163,10 +163,10 @@ config_3arms.json → SystemConfig
 | 文件 | 职责 |
 |------|------|
 | `sim_coordinator.py` | **★ 仿真协调器**。薄封装 `MultiArmCoordinator`，增加共享 `SimulationClient`、任务发送串行化（每臂锁 + 全局冷却）、`load_sim_config()` 仿真配置加载 |
-| `sim_arm_controller.py` | **★ 单臂仿真控制线程**。每臂独立运行：BuiltinCamera/SimCamera → GGCNN 模型 → TaskBuilder。一段式抓取管线（观察→聚类→锁定→POST /task），功能等价于真机 `ArmController` 但通过 HTTP 通信 |
+| `sim_arm_controller.py` | **★ 单臂仿真控制线程**。每臂独立运行：BuiltinCamera/SimCamera → GGCNN 模型 → TaskBuilder。一段式抓取管线（观察→聚类→锁定→POST /task），功能等价于真机 `ArmController` 但通过 HTTP 通信。可选外部输入模式（`use_ext_input`）按 `arm_id` 轮询共享服务器，跳过相机/GGCNN |
 | `sim_visualizer.py` | **★ 多臂+全局摄像头可视化**。独立渲染线程，2×2 布局：Arm-0 / Arm-1 / Arm-2 / 全局摄像头+状态面板。支持 q=退出 / r=清除HAZARD / s=打印状态 |
 | `task_recorder.py` | **★ 生产任务落盘记录器（新）**。线程安全地以 JSON Lines 格式将每次发送的生产任务（识别物体、抓取目标、释放位置、10 步动作序列、发送结果）追加写入磁盘，崩溃不丢数据 |
-| `run_sim_3arm.py` | **★ 三臂仿真主启动入口**。加载配置→创建任务落盘记录器→连接仿真服务器→创建全局摄像头→创建 SimCoordinator→创建 3 个 SimArmController→启动可视化→等待退出 |
+| `run_sim_3arm.py` | **★ 三臂仿真主启动入口**。加载配置→创建任务落盘记录器→[可选] 启动外部坐标输入服务器（`--ext-input`）→连接仿真服务器→创建全局摄像头→创建 SimCoordinator→创建 3 个 SimArmController→启动可视化→等待退出 |
 
 ---
 
@@ -313,8 +313,11 @@ config_3arms.json → SystemConfig
         ├─ Thread-1 (Arm-Center): BuiltinCamera → GGCNN2 → TaskBuilder → main_loop
         └─ Thread-2 (Arm-Right):  BuiltinCamera → GGCNN2 → TaskBuilder → main_loop
 
-        每个 main_loop 内部流程：
-        ├─ 从本臂摄像头取图 → GGCNN2 推理 → 聚类 → LOCKED
+        每个 main_loop 内部流程（两种感知模式，由 --ext-input 决定）：
+        ├─ [摄像头模式] 从本臂摄像头取图 → GGCNN2 推理 → 聚类 → LOCKED
+        ├─ [外部输入模式] 按 arm_id 轮询共享外部服务器（POST /grasp_target）
+        │      └─ 有目标 → 按本臂工作区/Z 限位校验
+        │         → goal = 目标, LOCKED, 物体类型由 label 或最近邻匹配确定
         ├─ 判断目标在独占区还是协调区
         │   ├─ 独占区 → 直接构建任务序列
         │   └─ 协调区 → request_zone() 获锁后构建
@@ -373,8 +376,10 @@ config_3arms.json → SystemConfig
     │                     └─ POST /task {"arm_id": N, "sequence": [...]}
     │                  └─ GlobalCamera 俯瞰全局场景可视化
     │
-    └─ 外部输入 → POST /grasp_target → 直接输入基坐标系目标
+    └─ 外部输入 → POST /grasp_target（可选 arm_id）→ 直接输入基坐标系目标
                   跳过 GGCNN，与图像路径共用后续执行管线
+                  ├─ 单臂：run_simulation.py --ext-input
+                  └─ 三臂：run_sim_3arm.py --ext-input（arm_id 路由到对应臂）
 ```
 
 ---
@@ -418,6 +423,12 @@ python run_sim_3arm.py --task-log logs/tasks.jsonl
 
 # 禁用生产任务落盘
 python run_sim_3arm.py --no-task-log
+
+# 外部坐标输入模式（所有臂共用一台 HTTP 服务器，POST /grasp_target 携带 arm_id 路由）
+python run_sim_3arm.py --ext-input
+
+# 自定义外部输入服务器端口
+python run_sim_3arm.py --ext-input --ext-port 9090
 ```
 
 ### 单臂真实抓取
@@ -483,6 +494,7 @@ python run_3arm_grasp.py
 - **仿真模式**默认使用本地合成摄像头，如需连接仿真服务器获取图像，使用 `--sim-camera`
 - **三臂仿真** (`sim_3arm/`) 结构与真机 `multi_arm/` 对齐：每臂独立摄像头 + GGCNN 模型 + 全局俯瞰摄像头，支持与单臂仿真相同的三种摄像头模式 (`--sim-camera` / `--no-camera` / 默认本地合成)
 - **生产任务落盘** (`sim_3arm/`)：默认将每次发送的生产任务以 JSON Lines 格式写入 `sim_3arm/logs/tasks_<时间>.jsonl`（含识别物体类型、抓取目标、释放位置、10 步动作序列、发送结果，成功与失败均记录），可用 `--task-log` 指定路径、`--no-task-log` 关闭。每次抓取完成后可复用该文件做产量/良率统计
+- **外部坐标输入** (`sim_3arm/`)：加 `--ext-input` 启动一台共享 HTTP 服务器（默认 `0.0.0.0:8090`）。外部系统 `POST /grasp_target`，字段为基坐标系 `x,y,z`（mm），可选 `roll/pitch/yaw`、`label`（物体类型，如 `"part_a"`）、`arm_id`（0/1/2，路由目标到指定臂）。目标会先按该臂自身工作区/Z 限位校验，再通过 `label` 识别物体类型（未命中回退坐标最近邻匹配），并使用对应的释放位置
 
 ---
 

@@ -8,6 +8,7 @@ external_input — 外部坐标输入接收服务
 
 端点:
   POST /grasp_target  — 接收单个抓取目标坐标
+                        可选字段 arm_id: 指定目标臂编号（三臂模式路由用）
   GET  /status        — 服务器健康检查 + 队列状态
 
 使用方式:
@@ -41,15 +42,47 @@ logger = logging.getLogger(__name__)
 # HTTP 请求处理器
 # ═══════════════════════════════════════════════════════════════════════════════
 
+class _GraspTargetHTTPServer(HTTPServer):
+    """为每个 ExternalInputServer 实例独立挂载队列的 HTTP 服务器。
+
+    三臂模式下需要按 arm_id 路由：POST 带 arm_id 时写入该臂的独立子队列，
+    不带时写入通用队列。各臂消费自己的子队列，互不干扰。
+    """
+
+    def __init__(self, server_address, handler_cls, max_queue: int,
+                 server_start_time: float):
+        self._lock = threading.Lock()
+        self._max_queue = max_queue
+        self._queues: Dict[int, queue.Queue] = {}   # arm_id → 独立子队列
+        self._generic_queue = queue.Queue(maxsize=max_queue)  # arm_id=None
+        self.server_start_time = server_start_time
+        super().__init__(server_address, handler_cls)
+
+    def get_queue(self, arm_id: Optional[int]) -> queue.Queue:
+        """返回该臂的队列；arm_id=None 返回通用队列。按需惰性创建。"""
+        if arm_id is None:
+            return self._generic_queue
+        with self._lock:
+            q = self._queues.get(arm_id)
+            if q is None:
+                q = queue.Queue(maxsize=self._max_queue)
+                self._queues[arm_id] = q
+            return q
+
+    def total_queue_size(self) -> int:
+        """所有子队列 + 通用队列的总长度 (用于 /status)。"""
+        with self._lock:
+            return (self._generic_queue.qsize()
+                    + sum(q.qsize() for q in self._queues.values()))
+
+
 class _GraspTargetHandler(BaseHTTPRequestHandler):
     """内部 HTTP 请求处理器 — 处理 /grasp_target 和 /status 请求。
 
-    通过类属性 _shared_queue 与外部服务器实例共享队列。
+    队列与启动时间通过请求所属的 _GraspTargetHTTPServer 实例访问
+    (self.server.get_queue / self.server.server_start_time)，
+    因此多个 ExternalInputServer 实例互不干扰。
     """
-
-    # 类属性：由 ExternalInputServer 在创建时设置
-    _shared_queue: Optional[queue.Queue] = None
-    _server_start_time: float = 0.0
 
     def log_message(self, format, *args):
         """将默认的 stderr 日志重定向到 logging.debug，避免刷屏。"""
@@ -67,10 +100,8 @@ class _GraspTargetHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         """GET / 或 GET /status → 健康检查。"""
         if self.path in ('/', '/status'):
-            qsize = 0
-            if self._shared_queue is not None:
-                qsize = self._shared_queue.qsize()
-            uptime = time.monotonic() - self._server_start_time
+            qsize = self.server.total_queue_size()
+            uptime = time.monotonic() - self.server.server_start_time
             self._send_json(200, {
                 'status': 'ok',
                 'service': 'ExternalInputServer',
@@ -128,47 +159,48 @@ class _GraspTargetHandler(BaseHTTPRequestHandler):
         pitch = float(body.get('pitch', 0.0))
         yaw = float(body.get('yaw', 0.0))
         label = body.get('label', None)
+        arm_id = body.get('arm_id', None)
+        if arm_id is not None:
+            try:
+                arm_id = int(arm_id)
+            except (TypeError, ValueError):
+                logger.warning("arm_id 非整数，忽略路由: %r", arm_id)
+                arm_id = None
 
         target = [x, y, z, roll, pitch, yaw]
-        # 携带 label（物体类型，用于任务切换）；None 表示未指定
-        entry = (target, label)
+        # 携带 label（物体类型，用于任务切换）与 arm_id（臂路由）；
+        # arm_id=None 表示通用目标（单臂模式），由 get_target 消费
+        entry = (target, label, arm_id)
+        target_q = self.server.get_queue(arm_id)
 
         # 放入队列
-        if self._shared_queue is not None:
+        try:
+            target_q.put_nowait(entry)
+            qsize = target_q.qsize()
+            logger.info(
+                "外部坐标已接收: X=%.1f Y=%.1f Z=%.1f Yaw=%.1f "
+                "label=%s arm_id=%s (队列: %d)",
+                x, y, z, yaw, label, arm_id, qsize
+            )
+        except queue.Full:
+            # 队列满 → 丢弃最旧的目标，放入新的
             try:
-                self._shared_queue.put_nowait(entry)
-                qsize = self._shared_queue.qsize()
-                logger.info(
-                    "外部坐标已接收: X=%.1f Y=%.1f Z=%.1f Yaw=%.1f "
-                    "label=%s (队列: %d)",
-                    x, y, z, yaw, label, qsize
-                )
-            except queue.Full:
-                # 队列满 → 丢弃最旧的目标，放入新的
-                try:
-                    self._shared_queue.get_nowait()
-                    self._shared_queue.put_nowait(entry)
-                    logger.warning("外部坐标队列已满，已丢弃最旧目标")
-                    self._send_json(200, {
-                        'status': 'ok',
-                        'warning': 'Queue was full, oldest target discarded',
-                        'queued': self._shared_queue.qsize(),
-                        'target': target,
-                    })
-                    return
-                except queue.Empty:
-                    pass
-
-                self._send_json(503, {
-                    'status': 'error',
-                    'message': 'Queue full, cannot accept target'
+                target_q.get_nowait()
+                target_q.put_nowait(entry)
+                logger.warning("外部坐标队列已满，已丢弃最旧目标")
+                self._send_json(200, {
+                    'status': 'ok',
+                    'warning': 'Queue was full, oldest target discarded',
+                    'queued': target_q.qsize(),
+                    'target': target,
                 })
                 return
-        else:
-            logger.error("共享队列未初始化!")
-            self._send_json(500, {
+            except queue.Empty:
+                pass
+
+            self._send_json(503, {
                 'status': 'error',
-                'message': 'Internal server error: queue not initialized'
+                'message': 'Queue full, cannot accept target'
             })
             return
 
@@ -178,10 +210,12 @@ class _GraspTargetHandler(BaseHTTPRequestHandler):
                 'x': x, 'y': y, 'z': z,
                 'roll': roll, 'pitch': pitch, 'yaw': yaw,
             },
-            'queued': self._shared_queue.qsize(),
+            'queued': target_q.qsize(),
         }
         if label:
             resp['received']['label'] = label
+        if arm_id is not None:
+            resp['received']['arm_id'] = arm_id
 
         self._send_json(200, resp)
 
@@ -223,14 +257,9 @@ class ExternalInputServer:
         self.host = host
         self.port = port
         self._max_queue = max_queue
-        self._queue: queue.Queue = queue.Queue(maxsize=max_queue)
-        self._server: Optional[HTTPServer] = None
+        self._server: Optional[_GraspTargetHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
-
-        # 将队列注入到处理器类属性中
-        _GraspTargetHandler._shared_queue = self._queue
-        _GraspTargetHandler._server_start_time = 0.0
 
     # ── 属性 ────────────────────────────────────────────────────────────────
 
@@ -253,12 +282,15 @@ class ExternalInputServer:
             return
 
         try:
-            self._server = HTTPServer((self.host, self.port), _GraspTargetHandler)
+            self._server = _GraspTargetHTTPServer(
+                (self.host, self.port), _GraspTargetHandler,
+                max_queue=self._max_queue,
+                server_start_time=time.monotonic(),
+            )
         except OSError as e:
             logger.error("无法绑定 %s:%d — %s", self.host, self.port, e)
             raise
 
-        _GraspTargetHandler._server_start_time = time.monotonic()
         self._running = True
         self._thread = threading.Thread(
             target=self._serve_forever,
@@ -302,12 +334,13 @@ class ExternalInputServer:
     def get_target(self) -> Optional[List[float]]:
         """非阻塞获取最新外部坐标（兼容旧接口，仅返回坐标）。
 
-        一次性清空队列中的所有目标，只返回最新的（丢弃中间过时的坐标）。
+        只消费通用队列（arm_id=None，即单臂模式 POST 不携带 arm_id 的条目）。
+        一次性清空该队列，只返回最新的（丢弃中间过时的坐标）。
 
         返回:
             [X, Y, Z, Roll, Pitch, Yaw] 列表 (mm/度)，或 None 如果队列为空
         """
-        latest = self._drain_latest()
+        latest = self._drain_queue(self._target_queue(None))
         if latest is None:
             return None
         return latest[0]
@@ -315,23 +348,64 @@ class ExternalInputServer:
     def get_target_with_label(self) -> Optional[Tuple[List[float], Optional[str]]]:
         """非阻塞获取最新外部坐标及其 label（物体类型）。
 
+        只消费通用队列（arm_id=None 的条目）。
+
         返回:
             (target, label) 元组，label 可能为 None；队列为空返回 None
         """
-        return self._drain_latest()
+        latest = self._drain_queue(self._target_queue(None))
+        if latest is None:
+            return None
+        return latest[0], latest[1]
 
-    def _drain_latest(self) -> Optional[Tuple[List[float], Optional[str]]]:
-        """清空队列并返回最新 (target, label)；队列为空返回 None。"""
+    def get_target_for(self, arm_id: int) -> Optional[Tuple[List[float], Optional[str]]]:
+        """非阻塞获取指定臂的最新外部坐标（三臂模式）。
+
+        只消费该臂的独立子队列（POST 携带 arm_id=arm_id 的条目），
+        与其它臂完全隔离；通用条目（arm_id=None）不在此消费。
+
+        参数:
+            arm_id: 目标臂编号
+
+        返回:
+            (target, label) 元组，或 None 如果该臂无新目标
+        """
+        latest = self._drain_queue(self._target_queue(arm_id))
+        if latest is None:
+            return None
+        return latest[0], latest[1]
+
+    # ── 内部实现 ──
+
+    def _target_queue(self, arm_id: Optional[int]) -> Optional[queue.Queue]:
+        """返回目标队列；服务器未启动时返回 None（调用方按空队列处理）。"""
+        if self._server is None:
+            return None
+        return self._server.get_queue(arm_id)
+
+    @staticmethod
+    def _normalize_entry(entry: Any) -> Tuple[List[float], Optional[str],
+                                              Optional[int]]:
+        """兼容旧格式（纯坐标列表 / (target, label)）与新格式 (target, label, arm_id)。"""
+        if isinstance(entry, tuple):
+            if len(entry) == 3:
+                return entry
+            if len(entry) == 2:
+                return entry[0], entry[1], None
+        return entry, None, None
+
+    @staticmethod
+    def _drain_queue(q: Optional[queue.Queue]) -> Optional[Tuple[List[float], Optional[str],
+                                                                 Optional[int]]]:
+        """清空单个队列并返回最新 (target, label, arm_id)；为空或 None 返回 None。"""
+        if q is None:
+            return None
         latest = None
         drained = 0
         while True:
             try:
-                entry = self._queue.get_nowait()
-                # 兼容旧格式（纯坐标列表）与新格式 ((target, label))
-                if isinstance(entry, tuple) and len(entry) == 2:
-                    latest = entry
-                else:
-                    latest = (entry, None)
+                entry = q.get_nowait()
+                latest = ExternalInputServer._normalize_entry(entry)
                 drained += 1
             except queue.Empty:
                 break
@@ -343,12 +417,14 @@ class ExternalInputServer:
 
     def has_target(self) -> bool:
         """检查是否有外部坐标等待处理（不取出）。"""
-        return not self._queue.empty()
+        return self.queue_size > 0
 
     @property
     def queue_size(self) -> int:
-        """当前队列中的目标数量。"""
-        return self._queue.qsize()
+        """当前所有子队列 + 通用队列中的目标总数。"""
+        if self._server is None:
+            return 0
+        return self._server.total_queue_size()
 
     # ── 上下文管理器 ──────────────────────────────────────────────────────
 
