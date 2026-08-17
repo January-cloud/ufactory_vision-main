@@ -485,8 +485,10 @@ class SimArmController:
                     object_type, release_xyz = self._recognize_and_select_task(
                         goal, label=ext_label or None
                     )
+                    server_object = self._resolve_server_object(object_type)
                     sequence = self._builder.build_pick_and_place(
-                        list(goal), release_xyz=release_xyz
+                        list(goal), release_xyz=release_xyz,
+                        server_object=server_object,
                     )
                     # 附带任务上下文供落盘记录 (object_type / goal / release_xyz)
                     success = self._coord.send_task(
@@ -682,6 +684,23 @@ class SimArmController:
             f"释放 {rule.release_xyz or self._cfg.release_xyz}"
         )
         return rule.object_type, rule.release_xyz
+
+    def _resolve_server_object(self, object_type: Optional[str]) -> Optional[str]:
+        """将项目内部物体类型映射为仿真服务器场景物体名。
+
+        服务器 (new2(1).py) 的 set_object 只认 sheet/cylinder/box/flange/
+        bearing；本项目物体类型为 part_a/part_b/part_c，需通过配置里的
+        object_name_map 映射。未配置映射时回退为原 object_type。
+
+        参数:
+            object_type: 项目内部物体类型 (如 "part_a")；None 返回 None
+
+        返回:
+            服务器场景物体名 (如 "box")，或 None (无物体可绑定)
+        """
+        if not object_type:
+            return None
+        return self._sim_cfg.object_name_map.get(object_type, object_type)
 
     def _validate_external_target(
             self, target: List[float]) -> Tuple[bool, List[float], str]:

@@ -2,6 +2,11 @@
   "sim_server_url": "http://192.168.1.121:8080",
   "sim_timeout": 15.0,
   "sim_retries": 2,
+  "object_name_map": {
+    "part_a": "box",
+    "part_b": "cylinder",
+    "part_c": "flange"
+  },
   "win_name": "3-Arm SIMULATION",
 
   "global_camera": {

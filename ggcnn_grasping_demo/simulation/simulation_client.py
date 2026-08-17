@@ -15,6 +15,11 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# 机械臂编号 → 仿真服务器内部标识 (new2(1).py)。
+# 服务器 /task 要求每个动作携带 "arm" 字段，取值为 'arm1'/'arm2'/'arm3'；
+# 本项目多臂配置使用整数 arm_id (0/1/2)，此处做映射。
+ARM_ID_TO_KEY = {0: 'arm1', 1: 'arm2', 2: 'arm3'}
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 自定义异常
@@ -124,6 +129,12 @@ class SimulationClient:
         """
         payload = {"sequence": sequence}
         if arm_id is not None:
+            # 服务器 (new2(1).py) 的 /task 要求每个动作显式携带 "arm" 字段
+            # (取值为 'arm1'/'arm2'/'arm3')，顶层 arm_id 反而被忽略。
+            arm_key = ARM_ID_TO_KEY.get(arm_id, arm_id)
+            payload["sequence"] = [
+                {**task, "arm": arm_key} for task in sequence
+            ]
             payload["arm_id"] = arm_id
         last_error = None
 

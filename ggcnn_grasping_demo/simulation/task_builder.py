@@ -85,7 +85,8 @@ class TaskBuilder:
     # ── 公开方法 ──────────────────────────────────────────────────────────────
 
     def build_pick_and_place(self, grasp_target: List[float],
-                             release_xyz: Optional[List[float]] = None) -> list:
+                             release_xyz: Optional[List[float]] = None,
+                             server_object: Optional[str] = None) -> list:
         """根据抓取目标构建完整的 pick-and-place 任务序列。
 
         参数:
@@ -95,6 +96,9 @@ class TaskBuilder:
             release_xyz:  可选，覆盖默认释放位置 [x, y, z] mm。
                           用于按物体类型切换释放位置（不同任务放到不同料位）。
                           None 时使用 self.config.release_xyz。
+            server_object: 可选，仿真服务器场景物体名 (如 "box"/"cylinder")。
+                           非空时在开启真空前插入 set_object 动作绑定被抓物体；
+                           None 时不插入 (向后兼容单臂/无物体绑定协议)。
 
         返回:
             任务 dict 列表，每项包含 type, params, wait 字段
@@ -146,6 +150,10 @@ class TaskBuilder:
             roll=180, pitch=0, yaw=Yaw,
             wait=cfg.descend_wait
         ))
+
+        # Step 4 前置: 绑定被抓物体 — 仿真服务器真空吸盘需先 set_object
+        if server_object:
+            sequence.append(self.build_set_object(server_object))
 
         # Step 4: 开启真空吸盘
         sequence.append(self.build_vacuum(on=True, wait=cfg.suction_wait))
@@ -249,6 +257,28 @@ class TaskBuilder:
         return {
             "type": "vacuum",
             "params": {"on": on},
+            "wait": round(wait, 2),
+        }
+
+    def build_set_object(self, object_name: str,
+                         wait: Optional[float] = None) -> dict:
+        """构建 set_object 动作 — 绑定机械臂当前要抓取的场景物体。
+
+        仿真服务器 (new2(1).py) 的真空吸盘在开启前必须先通过 set_object
+        绑定被抓物体，否则 check_grasp_distance 找不到对象而抓取失败。
+
+        参数:
+            object_name: 服务器场景物体名 (sheet/cylinder/box/flange/bearing)
+            wait:        动作完成后等待秒数，None 则 0 (无运动)
+
+        返回:
+            {"type": "set_object", "params": {"object": object_name}, "wait": ...}
+        """
+        if wait is None:
+            wait = 0.0
+        return {
+            "type": "set_object",
+            "params": {"object": object_name},
             "wait": round(wait, 2),
         }
 

@@ -73,6 +73,9 @@ class SimSystemConfig:
     task_rules: Dict[int, Dict[str, dict]] = field(default_factory=dict)
     """arm_id → {object_type → 任务规则 dict (label/position_xy/release_xyz ...)}"""
 
+    object_name_map: Dict[str, str] = field(default_factory=dict)
+    """项目物体类型 (part_a/...) → 仿真服务器场景物体名 (box/cylinder/...)。"""
+
     # ── 便捷访问 ──
     @property
     def arms(self) -> List[ArmConfig]:
@@ -131,6 +134,7 @@ def load_sim_config(json_path: str) -> SimSystemConfig:
         global_camera=global_camera,
         arm_camera_objects=arm_camera_objects,
         task_rules=task_rules,
+        object_name_map=raw.get('object_name_map', {}),
     )
 
     logger.info("已加载 %d 个臂的仿真配置 (server=%s)",
@@ -259,9 +263,16 @@ class SimCoordinator:
             try:
                 resp = self._client.post_task(sequence, arm_id=arm_id)
                 self._last_global_grasp_time = time.monotonic()
-                logger.info("Arm-%d: 任务已发送 (%d 步) — 响应: %s",
-                            arm_id, len(sequence), resp)
-                success = True
+                # 服务器可能返回 HTTP 200 但业务层 success=false (如拒绝任务)，
+                # 必须检查响应体 success 字段，避免把失败误判为成功。
+                if isinstance(resp, dict) and resp.get("success") is False:
+                    logger.error("Arm-%d: 服务器拒绝任务: %s",
+                                 arm_id, resp.get("error") or resp)
+                    success = False
+                else:
+                    logger.info("Arm-%d: 任务已发送 (%d 步) — 响应: %s",
+                                arm_id, len(sequence), resp)
+                    success = True
             except SimulationClientError as e:
                 logger.error("Arm-%d: 发送任务失败: %s", arm_id, e)
                 success = False
